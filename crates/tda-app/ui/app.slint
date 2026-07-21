@@ -1,0 +1,111 @@
+import { Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+// Milestone 3 minimal shell: a title bar, an "open file" button, a single
+// hardcoded channel plotted as a line graph, and a draggable vertical
+// cursor over it. Declarative markup only — all data/logic lives in Rust
+// (src/main.rs, src/graph.rs) per PROJECT_PLAN.md's stated preference for
+// keeping markup separate from logic.
+export component AppWindow inherits Window {
+    title: "tda-app";
+    preferred-width: 960px;
+    preferred-height: 620px;
+
+    // -- state provided by Rust --
+    in property <string> window-title: "tda-app — No file loaded";
+    in property <string> channel-name: "";
+    in property <string> channel-units: "";
+    in property <string> status-text: "Open a MoTeC .ld file to begin.";
+    in property <string> path-commands: "";
+    in property <float> view-width: 1000;
+    in property <float> view-height: 1000;
+    in property <bool> has-data: false;
+    in property <bool> cursor-visible: false;
+    in property <float> cursor-fraction: 0; // 0..1 across the plotted x range
+    in property <string> cursor-time-text: "";
+    in property <string> cursor-value-text: "";
+
+    // -- callbacks into Rust --
+    callback open-file();
+    callback cursor-moved(float); // fraction 0..1 across the graph width
+
+    VerticalBox {
+        padding: 10px;
+        spacing: 8px;
+
+        HorizontalBox {
+            padding: 0px;
+            spacing: 8px;
+            Button {
+                text: "Open .ld file...";
+                clicked => { root.open-file(); }
+            }
+            Text {
+                text: root.window-title;
+                vertical-alignment: center;
+                font-weight: 600;
+            }
+        }
+
+        Text {
+            text: root.has-data
+                ? root.channel-name + " (" + root.channel-units + ")"
+                : root.status-text;
+            font-size: 13px;
+            color: gray;
+        }
+
+        Rectangle {
+            background: #1b1e24;
+            border-width: 1px;
+            border-color: #3a3f4b;
+            vertical-stretch: 1;
+
+            graph-area := TouchArea {
+                width: 100%;
+                height: 100%;
+
+                moved => {
+                    if (self.pressed && self.width > 0px) {
+                        root.cursor-moved(max(0.0, min(1.0, self.mouse-x / self.width)));
+                    }
+                }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && self.width > 0px) {
+                        root.cursor-moved(max(0.0, min(1.0, self.mouse-x / self.width)));
+                    }
+                }
+            }
+
+            Path {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                commands: root.path-commands;
+                stroke: #4ea1ff;
+                stroke-width: 1.5px;
+                viewbox-width: root.view-width;
+                viewbox-height: root.view-height;
+            }
+
+            if root.cursor-visible: Rectangle {
+                x: root.cursor-fraction * parent.width - 1px;
+                y: 0px;
+                width: 2px;
+                height: 100%;
+                background: #ff5a5a;
+            }
+        }
+
+        HorizontalBox {
+            padding: 0px;
+            spacing: 20px;
+            Text {
+                text: root.cursor-visible ? "t = " + root.cursor-time-text + " ms" : "";
+            }
+            Text {
+                text: root.cursor-visible ? "value = " + root.cursor-value-text : "";
+            }
+        }
+    }
+}

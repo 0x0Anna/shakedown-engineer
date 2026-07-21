@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tda-formats/motec",
+    "crates/tda-core",
+    "crates/tda-cli",
+    "crates/tda-app",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+# Desktop-app tuning. Thin LTO: most of fat LTO's size/perf win at a much lower
+# compile-time cost — a reasonable default while the project is still iterating
+# quickly. `panic = "unwind"` (the default) is kept deliberately: this tool parses
+# untrusted/arbitrary telemetry log files, so panicking-but-recoverable behavior
+# (e.g. catch_unwind around a parse) matters more here than shaving binary size
+# via `panic = "abort"`.
+lto = "thin"
+codegen-units = 1
+strip = true

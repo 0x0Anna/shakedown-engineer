@@ -1,0 +1,23 @@
+[package]
+name = "tda-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Slint GUI shell (milestone 3): load a MoTeC .ld file, plot one channel, drag a time cursor. The ONLY crate in the workspace allowed to depend on Slint."
+build = "build.rs"
+
+[lib]
+name = "tda_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tda-app"
+path = "src/main.rs"
+
+[dependencies]
+tda-core = { path = "../tda-core" }
+slint = "1.17"
+rfd = "0.17"
+
+[build-dependencies]
+slint-build = "1.17"

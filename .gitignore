@@ -1,0 +1,21 @@
+# Rust
+/target
+**/target
+
+# Cargo.lock is committed: this workspace produces binaries (tda-cli, eventually
+# tda-app), so per Cargo convention we lock the resolved dependency graph.
+# If tda-formats/tda-core are split into standalone published library crates
+# later, revisit whether their own Cargo.lock should be excluded.
+
+# Editor / IDE
+.vs/
+.vscode/
+*.suo
+*.user
+
+# OS cruft
+Thumbs.db
+.DS_Store
+
+# Sample Log Data
+.sample-data/**

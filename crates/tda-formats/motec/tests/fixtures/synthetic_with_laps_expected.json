@@ -1,0 +1,24 @@
+{
+  "laps": [
+    {
+      "num": 0,
+      "start_time": 0.0,
+      "end_time": 2616.0
+    },
+    {
+      "num": 1,
+      "start_time": 2616.0,
+      "end_time": 4616.0
+    },
+    {
+      "num": 2,
+      "start_time": 4616.0,
+      "end_time": 10900.0
+    },
+    {
+      "num": 3,
+      "start_time": 10900.0,
+      "end_time": 14900.0
+    }
+  ]
+}
