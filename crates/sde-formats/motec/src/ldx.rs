@@ -3,7 +3,7 @@
 //!
 //! Observed from an Assetto Corsa Competizione export: unlike real MoTeC
 //! hardware/software (which encodes lap-crossing events as trigger values
-//! in the `.ld`'s own `Beacon` channel — see `tda-core`'s
+//! in the `.ld`'s own `Beacon` channel — see `sde-core`'s
 //! `laps_from_beacon`), ACC's `.ld` export leaves that channel's samples
 //! at a constant value and instead records the actual lap-crossing
 //! timestamps in this separate `.ldx` XML file, as

@@ -4245,6 +4245,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "sde-app"
+version = "0.1.0"
+dependencies = [
+ "rfd",
+ "sde-core",
+ "slint",
+ "slint-build",
+]
+
+[[package]]
+name = "sde-cli"
+version = "0.1.0"
+dependencies = [
+ "sde-core",
+]
+
+[[package]]
+name = "sde-core"
+version = "0.1.0"
+dependencies = [
+ "sde-motec",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "sde-motec"
+version = "0.1.0"
+dependencies = [
+ "binrw",
+ "roxmltree 0.20.0",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4777,43 +4814,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2972044a9e5e448a506a7ff6f0d03b566d8ef4cd6918a58fc59835a0f8666626"
 dependencies = [
  "pin-project-lite",
-]
-
-[[package]]
-name = "tda-app"
-version = "0.1.0"
-dependencies = [
- "rfd",
- "slint",
- "slint-build",
- "tda-core",
-]
-
-[[package]]
-name = "tda-cli"
-version = "0.1.0"
-dependencies = [
- "tda-core",
-]
-
-[[package]]
-name = "tda-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tda-motec",
-]
-
-[[package]]
-name = "tda-motec"
-version = "0.1.0"
-dependencies = [
- "binrw",
- "roxmltree 0.20.0",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
 ]
 
 [[package]]

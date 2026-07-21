@@ -1,9 +1,9 @@
-//! Core, UI-free data model: `Session` (built on top of `tda-formats`
+//! Core, UI-free data model: `Session` (built on top of `sde-formats`
 //! parsers) mirroring `TrackDataAnalysis`'s `data/base.py` `LogFile`
 //! dataclass shape (see PROJECT_PLAN.md).
 //!
 //! This crate has no GUI dependency and stays that way per the
-//! workspace's modularity principles — only `tda-app` (not yet built)
+//! workspace's modularity principles — only `sde-app` (not yet built)
 //! is allowed to depend on Slint.
 
 // clippy::pedantic/nursery notes (not part of the default lint set the
@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-pub use tda_motec::LdError;
+pub use sde_motec::LdError;
 
 /// A single telemetry channel. Field names mirror TDA's `Channel`
 /// dataclass (`data/base.py`).
@@ -33,8 +33,8 @@ pub struct Channel {
     pub values: Vec<f64>,
 }
 
-impl From<tda_motec::LdChannel> for Channel {
-    fn from(c: tda_motec::LdChannel) -> Self {
+impl From<sde_motec::LdChannel> for Channel {
+    fn from(c: sde_motec::LdChannel) -> Self {
         Self {
             name: c.name,
             units: c.unit,
@@ -82,28 +82,28 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Returns any [`LdError`] that `tda_motec::parse` returns — i.e. if
+    /// Returns any [`LdError`] that `sde_motec::parse` returns — i.e. if
     /// the file can't be read, or isn't a well-formed MoTeC `.ld` file.
     pub fn load_motec(path: &Path) -> Result<Self, LdError> {
-        let ld_file = tda_motec::parse(path)?;
-        // The `.ldx` sidecar (see `tda_motec::ldx`) is optional supplemental
+        let ld_file = sde_motec::parse(path)?;
+        // The `.ldx` sidecar (see `sde_motec::ldx`) is optional supplemental
         // data some exporters (e.g. Assetto Corsa Competizione) write
         // alongside the `.ld` file. Its absence or malformedness is not an
         // error for loading the session — it just means lap splitting falls
         // back to the `.ld`'s own Beacon channel, per `laps_from_beacon`.
-        let ldx = tda_motec::parse_ldx(&path.with_extension("ldx")).ok();
+        let ldx = sde_motec::parse_ldx(&path.with_extension("ldx")).ok();
         Ok(Self::from_ld_file_and_ldx(ld_file, ldx))
     }
 
-    /// Build a `Session` from an already-parsed `tda_motec::LdFile`, with
+    /// Build a `Session` from an already-parsed `sde_motec::LdFile`, with
     /// no `.ldx` sidecar data (lap splitting uses the `.ld`'s own Beacon
     /// channel — see `laps_from_beacon`).
     #[must_use]
-    pub fn from_ld_file(ld_file: tda_motec::LdFile) -> Self {
+    pub fn from_ld_file(ld_file: sde_motec::LdFile) -> Self {
         Self::from_ld_file_and_ldx(ld_file, None)
     }
 
-    fn from_ld_file_and_ldx(ld_file: tda_motec::LdFile, ldx: Option<tda_motec::LdxFile>) -> Self {
+    fn from_ld_file_and_ldx(ld_file: sde_motec::LdFile, ldx: Option<sde_motec::LdxFile>) -> Self {
         let channels: HashMap<String, Channel> = ld_file
             .channels
             .into_iter()
@@ -124,7 +124,7 @@ impl Session {
 
         // Prefer `.ldx` marker times when available and non-empty (e.g. ACC
         // exports, whose embedded Beacon-equivalent channel never carries
-        // real trigger values — see `tda_motec::ldx`'s doc comment). Falls
+        // real trigger values — see `sde_motec::ldx`'s doc comment). Falls
         // back to the `.ld`'s own Beacon channel otherwise.
         let laps = match ldx.filter(|l| !l.marker_times_ms.is_empty()) {
             Some(ldx) => laps_from_markers(&ldx.marker_times_ms, end_time),
@@ -226,7 +226,7 @@ fn laps_from_beacon(channels: &HashMap<String, Channel>, end_time: f64) -> Vec<L
 }
 
 /// Derive lap boundaries from `.ldx` sidecar marker times (see
-/// `tda_motec::ldx`), instead of the `.ld`'s own Beacon channel. `markers`
+/// `sde_motec::ldx`), instead of the `.ld`'s own Beacon channel. `markers`
 /// is expected pre-sorted ascending (as `LdxFile::marker_times_ms` is).
 /// Markers outside `(0, end_time)` are dropped since they'd produce a
 /// zero-length or out-of-range lap.
@@ -256,7 +256,7 @@ fn boundaries_to_laps(boundaries: &[f64]) -> Vec<Lap> {
         .collect()
 }
 
-fn build_metadata(m: &tda_motec::LdMetadata) -> HashMap<String, String> {
+fn build_metadata(m: &sde_motec::LdMetadata) -> HashMap<String, String> {
     let mut out = HashMap::new();
     out.insert("Device Serial".into(), m.device_serial.to_string());
     out.insert("Device Type".into(), m.device_type.clone());

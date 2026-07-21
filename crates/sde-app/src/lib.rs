@@ -1,4 +1,4 @@
-//! `tda-app`: the Slint GUI shell. Per `PROJECT_PLAN.md`, this is the
+//! `sde-app`: the Slint GUI shell. Per `PROJECT_PLAN.md`, this is the
 //! *only* crate in the workspace allowed to depend on Slint.
 //!
 //! The library target only exposes the Slint-free pure logic (channel

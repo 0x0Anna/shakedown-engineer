@@ -1,9 +1,9 @@
 [package]
-name = "tda-motec"
+name = "sde-motec"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Parser for MoTeC LD binary telemetry log files (part of the tda-formats workspace)"
+description = "Parser for MoTeC LD binary telemetry log files (part of the sde-formats workspace)"
 
 [dependencies]
 binrw = "0.15"

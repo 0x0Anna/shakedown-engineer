@@ -1,14 +1,16 @@
 ---
 name: add-format-parser
-description: Use when adding a new telemetry log format parser under crates/tda-formats/ (e.g. AiM XRK, iRacing IBT, RaceLogic VBOX, ECUMaster ADULOG, Race Technology RUN, MegaLogViewer MLG) — establishes the pattern to follow, based on how tda-motec was built and validated.
+description: Use when adding a new telemetry log format parser under crates/sde-formats/ (e.g. AiM XRK, iRacing IBT, RaceLogic VBOX, ECUMaster ADULOG, Race Technology RUN, MegaLogViewer MLG) — establishes the pattern to follow, based on how sde-motec was built and validated.
 ---
 
-# Adding a new tda-formats parser
+# Adding a new sde-formats parser
 
-This project (see `PROJECT_PLAN.md`) is a Rust port of
-[racer-coder/TrackDataAnalysis](https://github.com/racer-coder/TrackDataAnalysis).
-Each supported log format gets its own crate under `crates/tda-formats/<format>/`,
-following the pattern established by `crates/tda-formats/motec/`. Use that crate as
+This project, **Shakedown Engineer** (see `PROJECT_PLAN.md`), ports its telemetry
+log parsing from [racer-coder/TrackDataAnalysis](https://github.com/racer-coder/TrackDataAnalysis)
+— that stays general-purpose, format-by-format, independent of the rally-focused
+setup/analysis features being built on top of it. Each supported log format gets
+its own crate under `crates/sde-formats/<format>/`,
+following the pattern established by `crates/sde-formats/motec/`. Use that crate as
 the reference implementation.
 
 ## Process
@@ -34,7 +36,7 @@ the reference implementation.
    parses identically through both Python implementations before trusting it. Real
    vendor/sim-exported files remain a valuable non-blocking follow-up — note them as
    a manual task in `PROJECT_PLAN.md` rather than blocking on acquiring them.
-4. **Crate structure**, mirroring `tda-motec`:
+4. **Crate structure**, mirroring `sde-motec`:
    - `Cargo.toml` — keep dependencies minimal, no UI/GUI deps (this crate must stay
      usable standalone per `PROJECT_PLAN.md`'s modularity principles).
    - `src/raw.rs` — `binrw`-derived structs for genuinely fixed/sequential binary
@@ -45,14 +47,14 @@ the reference implementation.
      sequentially.
    - `src/error.rs` — format-specific error type.
    - `src/lib.rs` — public API. Keep field names close to TDA's `data/base.py`
-     `Channel`/`LogFile` dataclasses so `tda-core` can wrap it consistently across
-     formats — check `tda-motec`'s `LdFile`/`LdChannel` types for the shape to match.
+     `Channel`/`LogFile` dataclasses so `sde-core` can wrap it consistently across
+     formats — check `sde-motec`'s `LdFile`/`LdChannel` types for the shape to match.
    - `tests/fixtures/` — committed binary fixture(s) + a hand-written or
      oracle-derived `*_expected.json` with values to assert against.
    - `tests/integration.rs` — parse the fixture, assert every channel's
      name/unit/sample_rate/values against the expected JSON (use an epsilon
      comparison for float precision, not exact equality).
-5. **Wire into `tda-core`** via a `Session::load_<format>` constructor once the
+5. **Wire into `sde-core`** via a `Session::load_<format>` constructor once the
    parser crate itself is tested and green, matching `Session::load_motec`.
 6. **Verify before reporting done:** `cargo build --workspace`, `cargo test
    --workspace`, `cargo clippy --workspace --all-targets` must all pass. Rust is
@@ -65,6 +67,6 @@ the reference implementation.
 
 ## Scope discipline
 
-Don't add GUI code (`tda-app` is Slint-only, per `PROJECT_PLAN.md`) and don't reach
-into `tda-setup`/`tda-analysis`/`tda-gis`/`tda-video` from a format-parser crate —
+Don't add GUI code (`sde-app` is Slint-only, per `PROJECT_PLAN.md`) and don't reach
+into `sde-setup`/`sde-analysis`/`sde-gis`/`sde-video` from a format-parser crate —
 those are separate later milestones with their own scope.

@@ -1,6 +1,6 @@
 //! Edge cases for `Session`'s Beacon-derived lap splitting, beyond the
 //! multi-lap fixture covered in `beacon_laps.rs`. These build a fake
-//! `tda_motec::LdFile` directly in memory (all its fields are public)
+//! `sde_motec::LdFile` directly in memory (all its fields are public)
 //! rather than requiring a new `.ld` fixture, since we're exercising
 //! `Session::from_ld_file`'s lap logic, not the MoTeC parser itself.
 
@@ -10,8 +10,8 @@
 // an approximation bug. `doc_markdown`: see the crate root's note.
 #![allow(clippy::float_cmp, clippy::doc_markdown)]
 
-use tda_core::Session;
-use tda_motec::{LdChannel, LdFile, LdMetadata};
+use sde_core::Session;
+use sde_motec::{LdChannel, LdFile, LdMetadata};
 
 fn channel(name: &str, timecodes: Vec<f64>, values: Vec<f64>, interpolate: bool) -> LdChannel {
     LdChannel {

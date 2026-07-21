@@ -1,16 +1,25 @@
-# Track Data Analysis — Rust Port (Project Plan)
+# Shakedown Engineer (Project Plan)
 
 ## Overview
 
-This project is a Rust + Slint port of [racer-coder/TrackDataAnalysis](https://github.com/racer-coder/TrackDataAnalysis) 
-a PySide6-based racing telemetry viewer (Python/Cython, supports AiM XRK, MoTeC LD,
-ECUMaster ADULOG, RaceLogic VBOX, Race Technology RUN, MegaLogViewer MLG, iRacing IBT).
+**Shakedown Engineer** (crate prefix `sde-`) is a rally **race engineer tool**:
+creating and analyzing vehicle setups per stage (suspension, ABS/TCS/aero
+electronics, not just driver performance), for use with Richard Burns Rally (NGP
+physics / rallysimfans), Dirt Rally, Assetto Corsa Rally (limited telemetry), and
+EA WRC.
 
-**Primary motivation:** this is not just a straight port. The main goal is to build a
-**race engineer tool** for rally — creating and analyzing vehicle setups per stage
-(suspension, ABS/TCS/aero electronics, not just driver performance), for use with
-Richard Burns Rally (NGP physics / rallysimfans), Dirt Rally, Assetto Corsa Rally
-(limited telemetry), and EA WRC.
+**Primary motivation:** the setup/analysis features (`sde-setup`, `sde-analysis`,
+per-sim setup adapters) are rally-specific and are the reason this project exists —
+that's where new development effort is prioritized.
+
+**Foundation (general-purpose, not rally-specific):** its telemetry log parsing and
+core data model (`sde-formats`, `sde-core`) are a Rust + Slint port of
+[racer-coder/TrackDataAnalysis](https://github.com/racer-coder/TrackDataAnalysis), a
+PySide6-based racing telemetry viewer (Python/Cython, supports AiM XRK, MoTeC LD,
+ECUMaster ADULOG, RaceLogic VBOX, Race Technology RUN, MegaLogViewer MLG, iRacing
+IBT). This layer is deliberately kept sim-agnostic and useful for circuit racing too
+— it's shared infrastructure, not the differentiator. New parser work here follows
+the port faithfully; new *feature* work goes into the rally-focused crates above.
 
 **Secondary goals:**
 - Learn Rust more deeply through this project.
@@ -41,7 +50,7 @@ Richard Burns Rally (NGP physics / rallysimfans), Dirt Rally, Assetto Corsa Rall
 
 ```
 crates/
-├── tda-formats/          # binary parsers — no UI/GUI deps, dependency-light
+├── sde-formats/          # binary parsers — no UI/GUI deps, dependency-light
 │   ├── motec/            # MoTeC LD parser — FIRST TARGET, in progress
 │   ├── xrk/              # AiM
 │   ├── ibt/               # iRacing
@@ -51,40 +60,40 @@ crates/
 │   ├── mlg/                # MegaLogViewer
 │   └── rbr/, dirt_rally/, acr/, ea_wrc/   # NEW: per-sim SETUP FILE adapters
 │                                            # (read each sim's own install-dir car/track/
-│                                            #  setup files, map into tda-setup's model —
+│                                            #  setup files, map into sde-setup's model —
 │                                            #  same adapter pattern as telemetry parsers,
 │                                            #  but for setup data instead of channel data)
 │
-├── tda-core/              # Session/Channel/Lap data model, math channel expression
+├── sde-core/              # Session/Channel/Lap data model, math channel expression
 │                          # engine, interpolation/resampling, metadata DB cache (sqlite)
-│                          # — depends on tda-formats, UI-free
+│                          # — depends on sde-formats, UI-free
 │
-├── tda-setup/             # NEW (race-engineer feature): sim-agnostic setup sheet model —
+├── sde-setup/             # NEW (race-engineer feature): sim-agnostic setup sheet model —
 │                          # springs, dampers, ARBs, ride height, diff, gearing, tire
 │                          # pressures/compounds. Versioned and diffable per stage.
-│                          # Populated either manually or via tda-formats::<sim> adapters.
+│                          # Populated either manually or via sde-formats::<sim> adapters.
 │
-├── tda-analysis/          # NEW (race-engineer feature): derived-channel analysis —
+├── sde-analysis/          # NEW (race-engineer feature): derived-channel analysis —
 │                          # damper velocity histograms, ABS/TC intervention markers +
 │                          # frequency/duration stats, ride-height/roll estimates from
 │                          # suspension travel differentials, brake balance effectiveness.
 │                          # This is the "analyze the vehicle, not just the driver" piece.
 │
-├── tda-gis/               # GPS/map-tile logic, UI-free
-├── tda-video/             # libmpv wrapper + video/data sync
+├── sde-gis/               # GPS/map-tile logic, UI-free
+├── sde-video/             # libmpv wrapper + video/data sync
 │
-└── tda-app/                # Slint GUI. ONLY crate allowed to depend on Slint.
+└── sde-app/                # Slint GUI. ONLY crate allowed to depend on Slint.
                             # Everything else must remain usable standalone
                             # (CLI tools, other projects, WASM builds, etc.)
 
 (future, not started)
-└── tda-viz/                # 2D then optional 3D pose animation from logged data
+└── sde-viz/                # 2D then optional 3D pose animation from logged data
                             # (damper travel, steering angle, yaw rate) — NOT a physics
                             # simulator, just data-driven visualization/replay.
 ```
 
 ### Modularity principles
-- `tda-formats` and `tda-core` must stay UI-free and dependency-light so they're
+- `sde-formats` and `sde-core` must stay UI-free and dependency-light so they're
   reusable outside this app (e.g. as a CLI tool or in someone else's project).
 - Common `LogFormat` trait for telemetry parsers so new formats plug in without
   touching GUI code:
@@ -94,10 +103,10 @@ crates/
       fn detect(data: &[u8]) -> bool; // magic bytes sniffing
   }
   ```
-- Same adapter pattern applies to per-sim setup file readers in `tda-formats::<sim>`,
-  feeding into `tda-setup`'s shared data model.
+- Same adapter pattern applies to per-sim setup file readers in `sde-formats::<sim>`,
+  feeding into `sde-setup`'s shared data model.
 - Feature-gate heavier optional deps (e.g. `sqlite` feature for the DB cache).
-- Consider publishing `tda-formats` / `tda-core` to crates.io early (even 0.1.0)
+- Consider publishing `sde-formats` / `sde-core` to crates.io early (even 0.1.0)
   once 1–2 formats work, as a forcing function for a clean public API.
 
 ## Reference repos / prior art
@@ -108,7 +117,7 @@ crates/
   it ships its own `data/motec.py`, MIT-licensed, 2024, actively maintained, and it's
   literally the parser belonging to the tool this project ports. Its `data/base.py`
   also defines the exact `Channel`/`Lap`/`LogFile` dataclasses to mirror in
-  `tda-core`'s Rust data model:
+  `sde-core`'s Rust data model:
   - `Channel { timecodes: array, values: array, name, units, dec_pts, interpolate }`
     (`interpolate=False` means "hold previous value until next timecode" — needed for
     discrete/event channels vs continuous ones)
@@ -117,7 +126,7 @@ crates/
     key_channel_map: [speed, lat, long, alt], file_name }`
   - Lap splitting is derived from a `Beacon` channel via a small state machine
     (see `MOTEC()` in `data/motec.py`) — worth porting almost verbatim into
-    `tda-core`'s session-building step in milestone 2.
+    `sde-core`'s session-building step in milestone 2.
 - **MoTeC LD format cross-reference:** `gotzl/ldparser` (Python, GPL-3.0) — older,
   reverse-engineered LD parser. Still useful as a second independent implementation to
   diff against, and its `ldData.frompd()/write()` round-trip is a handy way to generate
@@ -130,18 +139,18 @@ crates/
   directory JSON/ini files for car/track/setup data, and its
   `docs/data-model-rbr.md` domain model doc, which documents `CarGroup`, `CarModel`,
   `Car`, `CarData`, `CarGroupMap`, `Stage`, `CarPersonalOptions`, `StagePersonalOptions`
-  — the field-level shape to target for the `tda-formats::rbr` adapter in milestone 9.
+  — the field-level shape to target for the `sde-formats::rbr` adapter in milestone 9.
   (Local reference repo: `../race-engineer`)
 - **iRacing telemetry reference:** `ethansheffield/iracing-telemetry-tool` (Python,
   MIT) — a *live* SDK capture tool (`pyirsdk` shared-memory polling), not an `.ibt`
-  file parser, so its code is **not directly portable** to `tda-formats::ibt`
+  file parser, so its code is **not directly portable** to `sde-formats::ibt`
   (milestone 4). Useful only as a channel/metadata reference:
   - Confirms the iRacing channel set and units to target: `lap`, `time`, `distance`,
     `distance_pct`, `throttle`, `brake`, `steering`, `gear`, `rpm`, `speed` (m/s),
     `lat_accel`/`long_accel` (G), `yaw_rate`, `steering_wheel_angle` (rad).
   - Session metadata shape (`track_name`, `track_config`, `car_name`, `session_type`
     enum 0–4 Testing/Practice/Qualifying/Warmup/Race, `driver_name`) mirrors what
-    IBT's YAML session-info header carries — cross-check for `tda-core::Session`
+    IBT's YAML session-info header carries — cross-check for `sde-core::Session`
     metadata fields once the iRacing adapter lands.
   - Lap splitting is trivial for IBT vs. MoTeC: iRacing's SDK/IBT exposes an
     explicit `Lap` variable directly, so milestone 4 shouldn't need a beacon-style
@@ -190,7 +199,7 @@ code reading and a generated synthetic `.ld` file (see below). Findings:
   `ldData.frompd(df).write(path)` round-trip (3 float32 channels, 50 samples, 10 Hz).
   Verified it parses identically through **both** `ldparser.fromfile()` and TDA's
   `motec._decode()` (values match to float32 precision). Committed to
-  `crates/tda-formats/motec/tests/fixtures/synthetic.ld` with expected values dumped to
+  `crates/sde-formats/motec/tests/fixtures/synthetic.ld` with expected values dumped to
   `synthetic_expected.json` alongside it — use this as the first Rust parser unit test
   fixture. Getting a real SimHub `.ld` file remains a **manual follow-up** (needs
   SimHub + an actual sim session) to catch any real-world quirks the synthetic file
@@ -199,32 +208,32 @@ code reading and a generated synthetic `.ld` file (see below). Findings:
 
 ## Milestone sequence
 
-1. **MoTeC LD parser** *(done, 2026-07-21 — see `crates/tda-formats/motec`)* — using `binrw` for the
+1. **MoTeC LD parser** *(done, 2026-07-21 — see `crates/sde-formats/motec`)* — using `binrw` for the
    fixed-record binary layout (file header with meta/data/event pointers → channel header
    linked list → sample data blocks with mul/scale/shift/decimals conversion). Validate
    incrementally (header offsets → channel list → sample values) against TDA's
    `data/motec.py` (primary oracle) using the committed synthetic `.ld` fixture at
-   `crates/tda-formats/motec/tests/fixtures/synthetic.ld` (+ `synthetic_expected.json`);
+   `crates/sde-formats/motec/tests/fixtures/synthetic.ld` (+ `synthetic_expected.json`);
    swap in a real SimHub-generated `.ld` file once available. See "Validation findings"
    above for the exact byte layout and the shift/offset conversion-formula gotcha.
    *(Hardening pass, 2026-07-21):* fixed a panic-on-malformed-input bug where a corrupt
    `channel_meta_addr`/linked-list pointer past EOF indexed the file buffer directly
    instead of going through a bounds-checked `LdError::Truncated`; added unit tests
-   in `crates/tda-formats/motec/src/lib.rs` exercising every `LdError` variant via
+   in `crates/sde-formats/motec/src/lib.rs` exercising every `LdError` variant via
    deliberately-malformed in-memory buffers (no fixture files needed).
-2. **`tda-core::Session` + CLI example** (`dump_channels`) — proves the parser →
+2. **`sde-core::Session` + CLI example** (`dump_channels`) — proves the parser →
    data-model boundary works before any UI exists. **Done** (2026-07-21): `Session`
    mirrors TDA's `base.py` dataclasses, `dump_channels` prints metadata/laps/channels
    for a given `.ld` file, and lap-splitting is ported verbatim from `MOTEC()`'s
    Beacon-channel state machine (including its narrow `v == 100 || v == 2` trigger
    check and the 14-bit sign-corrected value decode) — see
-   `crates/tda-core/src/lib.rs`'s `laps_from_beacon`, tested against
-   `crates/tda-formats/motec/tests/fixtures/synthetic_with_laps.ld`.
-3. **Slint shell + first graph** *(done, 2026-07-21 — see `crates/tda-app`)* — minimal
+   `crates/sde-core/src/lib.rs`'s `laps_from_beacon`, tested against
+   `crates/sde-formats/motec/tests/fixtures/synthetic_with_laps.ld`.
+3. **Slint shell + first graph** *(done, 2026-07-21 — see `crates/sde-app`)* — minimal
    window: load a log, plot one channel on a time/distance graph with cursor drag. First
-   end-to-end vertical slice. Implemented: `tda-app` (the only crate depending on Slint,
+   end-to-end vertical slice. Implemented: `sde-app` (the only crate depending on Slint,
    per the modularity principle above), a "load file" button opening a native file picker
-   (`rfd`, filtered to `.ld`) that loads via `tda_core::Session::load_motec`; a hand-drawn
+   (`rfd`, filtered to `.ld`) that loads via `sde_core::Session::load_motec`; a hand-drawn
    line graph (Slint `Path` element fed an SVG-style `commands` string built in Rust,
    markup kept in `ui/app.slint` separate from logic in `src/`); a draggable vertical
    cursor (`TouchArea` over the graph) showing time (ms) and the channel's value at the
@@ -241,13 +250,13 @@ code reading and a generated synthetic `.ld` file (see below). Findings:
    behind the shared `LogFormat` trait.
 5. **Core UI parity** — worksheets/docks, channel search, lap selection/comparison,
    math channels (matching the original tool's baseline usefulness).
-6. **`tda-setup`** — setup sheet data model + diff view between two setups. First
+6. **`sde-setup`** — setup sheet data model + diff view between two setups. First
    genuinely new (non-port) feature.
-7. **`tda-analysis`** — derived channels layered onto graphs: damper velocity
+7. **`sde-analysis`** — derived channels layered onto graphs: damper velocity
    histograms, ABS/TC intervention markers + stats, ride-height/roll estimates,
    brake bias effectiveness. This is where the race-engineer motivation pays off.
 8. **Video sync + GPS map** — port once core viewing/analysis is solid.
-9. **Per-sim setup adapters** — `tda-formats::rbr` first (cross-check against
+9. **Per-sim setup adapters** — `sde-formats::rbr` first (cross-check against
    `durandom/race-engineer`'s domain model docs), then Dirt Rally / ACR / EA WRC
    adapters as each sim's file formats are scoped (likely thinner given more
    limited/less open telemetry and setup file access than RBR). For RBR, the
@@ -255,7 +264,7 @@ code reading and a generated synthetic `.ld` file (see below). Findings:
    the actual telemetry channel-log source to target here — it's documented,
    plain-text, and column-named, unlike the `.rpl` replay files (see below), so
    it should land before/alongside any `.rpl` work.
-10. *(Future, deferred)* **`tda-viz`** — data-driven pose animation:
+10. *(Future, deferred)* **`sde-viz`** — data-driven pose animation:
     - `CarPose` struct (roll, pitch, yaw, position, steer angle, 4x wheel travel)
       computed from logged channels — no physics simulation, just geometry:
       ```
@@ -265,7 +274,7 @@ code reading and a generated synthetic `.ld` file (see below). Findings:
     - Start with a 2D top-down view before attempting 3D.
     - 3D approach if/when pursued: `three-d` crate, rendered off-screen to a texture,
       exposed to Slint as an `Image`, synced to the playback timeline cursor.
-    - Keep `tda-viz` UI-free except for the render module, mirroring the rest of
+    - Keep `sde-viz` UI-free except for the render module, mirroring the rest of
       the workspace's modularity principle.
 
 ### RBR NGP telemetry format findings (2026-07-21)
@@ -287,7 +296,7 @@ don't conflate them when scoping milestone 9:
     `BumpStopStiffnessFront_NGP`, etc.), `HandbrakePercentage_NGP`, VCU flags
     (`AutoGears`, `GearGuard`, `ClutchHelp`, `CenterDiffThrottle_00..NN`) — a
     real, populated example of the field set `durandom/race-engineer`'s data
-    model doc describes, useful for `tda-setup`'s RBR setup adapter.
+    model doc describes, useful for `sde-setup`'s RBR setup adapter.
   - Remaining ~7.6MB is dense binary, presumed per-tick replay/physics state.
     **Not decoded** — no public spec found; would need its own
     reverse-engineering pass (frame size looks variable) if ever pursued.
@@ -295,7 +304,7 @@ don't conflate them when scoping milestone 9:
 
 - **NGP telemetry recorder** (built into the NGP plugin itself, separate from
   `.rpl`): this is the actual documented, sim-native telemetry log format, and
-  should be the real target for `tda-formats::rbr` telemetry parsing.
+  should be the real target for `sde-formats::rbr` telemetry parsing.
   - **Struct definition**: `Plugins\NGP\sdk\rbr.telemetry.data.TelemetryData.h`
     — `#pragma pack(1)` C++ struct tree:
     `TelemetryData { totalSteps_, Stage stage_, Control control_, Car car_ }`.
@@ -332,7 +341,7 @@ don't conflate them when scoping milestone 9:
   - **UDP telemetry**: same `Car`/`Control`/`Stage` data is also emittable
     live over UDP (`udpTelemetry=1`, `udpTelemetryEndpoints=127.0.0.1:6776` in
     `RichardBurnsRally.ini`) — out of scope for a file parser, but useful if
-    live telemetry capture is ever wanted (parallel to the `tda-video` sync
+    live telemetry capture is ever wanted (parallel to the `sde-video` sync
     use case, not pursued now).
   - **No sample file captured yet** — `telemetryRecording=0` currently and
     `Plugins\NGP\telemetry\` is empty on this machine. **Manual follow-up**:
@@ -347,17 +356,17 @@ don't conflate them when scoping milestone 9:
       layout, cross-checked against TDA's own `data/motec.py` — see "Validation
       findings" above for the reconciled byte layout and the formula discrepancy.
 - [x] Read `durandom/race-engineer`'s `docs/data-model-rbr.md` (already cloned) —
-      field tables captured above; ready to inform the `tda-formats::rbr` adapter
+      field tables captured above; ready to inform the `sde-formats::rbr` adapter
       when milestone 9 comes up.
 - [x] Generated a synthetic, format-valid `.ld` fixture (no SimHub file was locally
       available) via `ldparser`'s write path, cross-validated against TDA's
-      `motec._decode()`. Committed to `crates/tda-formats/motec/tests/fixtures/`.
+      `motec._decode()`. Committed to `crates/sde-formats/motec/tests/fixtures/`.
 - [x] **Manual follow-up, real-world validation (2026-07-21):** tested against a real
       Assetto Corsa Competizione `.ld` export (`.sample-data/`, gitignored — not
       committed as a fixture; large and not ours to redistribute). Parsed cleanly
       (37 channels, physically sane values), but surfaced three real-world gaps
-      fixed this session, all in `crates/tda-formats/motec/src/lib.rs` and
-      `crates/tda-core/src/lib.rs`:
+      fixed this session, all in `crates/sde-formats/motec/src/lib.rs` and
+      `crates/sde-core/src/lib.rs`:
       - **Every channel's unit was blank.** TDA's `interpolate = unit not in ('s',
         '')` heuristic assumes real MoTeC hardware always labels analog channels
         with units; ACC's exporter doesn't, which would otherwise mark all
@@ -375,7 +384,7 @@ don't conflate them when scoping milestone 9:
         The real lap data lives in a sidecar `.ldx` XML file (`<MarkerGroup
         Name="Beacons">` with `<Marker Time="...">` in microseconds, plus summary
         `<String Id="Total Laps"/Fastest Lap"/"Fastest Time">` fields). Added
-        `tda_motec::ldx` (new `roxmltree`-based parser, `LdxFile`/`parse_ldx`) and
+        `sde_motec::ldx` (new `roxmltree`-based parser, `LdxFile`/`parse_ldx`) and
         wired it into `Session::load_motec`: if a same-stem `.ldx` file exists and
         parses with non-empty markers, its times take priority for lap splitting;
         otherwise falls back to the existing Beacon-channel state machine. A

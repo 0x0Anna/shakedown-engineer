@@ -37,7 +37,7 @@ fn parses_synthetic_fixture() {
     };
 
     let ld_file =
-        tda_motec::parse(&ld_path).unwrap_or_else(|e| panic!("failed to parse {ld_path:?}: {e}"));
+        sde_motec::parse(&ld_path).unwrap_or_else(|e| panic!("failed to parse {ld_path:?}: {e}"));
 
     assert_eq!(
         ld_file.channels.len(),

@@ -19,7 +19,7 @@ use std::rc::Rc;
 
 use slint::ComponentHandle;
 
-use tda_app::graph;
+use sde_app::graph;
 
 slint::include_modules!();
 
@@ -102,10 +102,10 @@ fn load_and_display(
         |n| n.to_string_lossy().to_string(),
     );
 
-    let session = match tda_core::Session::load_motec(path) {
+    let session = match sde_core::Session::load_motec(path) {
         Ok(s) => s,
         Err(e) => {
-            window.set_window_title(format!("tda-app — failed to load {file_name}").into());
+            window.set_window_title(format!("sde-app — failed to load {file_name}").into());
             window.set_status_text(format!("Error loading {file_name}: {e}").into());
             window.set_has_data(false);
             *plotted.borrow_mut() = None;
@@ -118,7 +118,7 @@ fn load_and_display(
     // alphabetically, falling back to the first channel). A proper
     // channel search/picker is deferred to milestone 5.
     let Some(channel) = graph::pick_default_channel(&session) else {
-        window.set_window_title(format!("tda-app — {file_name}").into());
+        window.set_window_title(format!("sde-app — {file_name}").into());
         window.set_status_text("File loaded, but it has no channels to plot.".into());
         window.set_has_data(false);
         *plotted.borrow_mut() = None;
@@ -138,7 +138,7 @@ fn load_and_display(
         max_time: plot.max_time,
     });
 
-    window.set_window_title(format!("tda-app — {file_name}").into());
+    window.set_window_title(format!("sde-app — {file_name}").into());
     window.set_has_data(true);
     window.set_channel_name(channel.name.clone().into());
     window.set_channel_units(channel.units.clone().into());

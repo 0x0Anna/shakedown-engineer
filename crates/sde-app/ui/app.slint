@@ -6,12 +6,12 @@ import { Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
 // (src/main.rs, src/graph.rs) per PROJECT_PLAN.md's stated preference for
 // keeping markup separate from logic.
 export component AppWindow inherits Window {
-    title: "tda-app";
+    title: "sde-app";
     preferred-width: 960px;
     preferred-height: 620px;
 
     // -- state provided by Rust --
-    in property <string> window-title: "tda-app — No file loaded";
+    in property <string> window-title: "sde-app — No file loaded";
     in property <string> channel-name: "";
     in property <string> channel-units: "";
     in property <string> status-text: "Open a MoTeC .ld file to begin.";

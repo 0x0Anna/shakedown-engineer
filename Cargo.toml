@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tda-formats/motec",
-    "crates/tda-core",
-    "crates/tda-cli",
-    "crates/tda-app",
+    "crates/sde-formats/motec",
+    "crates/sde-core",
+    "crates/sde-cli",
+    "crates/sde-app",
 ]
 
 [workspace.package]

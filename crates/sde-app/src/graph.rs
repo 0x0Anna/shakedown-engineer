@@ -1,4 +1,4 @@
-//! Pure, Slint-free graph/cursor logic: turning a `tda_core::Channel`
+//! Pure, Slint-free graph/cursor logic: turning a `sde_core::Channel`
 //! into an SVG-style path string for the `Path` element, and looking up
 //! the value at an arbitrary cursor time. Kept separate from `main.rs`
 //! so it can be unit tested without any GUI dependency or display.
@@ -17,7 +17,7 @@
 
 use std::fmt::Write as _;
 
-use tda_core::Channel;
+use sde_core::Channel;
 
 /// A normalized plot: an SVG `Path`-compatible `commands` string plus the
 /// `viewbox-width`/`viewbox-height` it was built against, and the time
@@ -92,7 +92,7 @@ pub fn build_plot(channel: &Channel, view_width: f64, view_height: f64) -> Optio
 /// Look up the value of `channel` at time `t` (milliseconds), respecting
 /// `channel.interpolate`: when `true`, linearly interpolate between the
 /// bracketing samples; when `false`, hold the previous sample's value
-/// (matching `tda-core`'s `Channel::interpolate` semantics, ported from
+/// (matching `sde-core`'s `Channel::interpolate` semantics, ported from
 /// TDA's `data/base.py` `Channel` dataclass).
 ///
 /// `t` is clamped to the channel's time range: values before the first
@@ -150,7 +150,7 @@ pub fn value_at_raw(timecodes: &[f64], values: &[f64], interpolate: bool, t: f64
 /// shortcut — no channel-picker UI exists yet (deferred to milestone 5's
 /// "core UI parity").
 #[must_use]
-pub fn pick_default_channel(session: &tda_core::Session) -> Option<&Channel> {
+pub fn pick_default_channel(session: &sde_core::Session) -> Option<&Channel> {
     let mut names: Vec<&String> = session.channels.keys().collect();
     names.sort();
 
@@ -245,12 +245,12 @@ mod tests {
         assert!(build_plot(&c, 100.0, 100.0).is_none());
     }
 
-    fn session_with(channels: Vec<Channel>) -> tda_core::Session {
-        tda_core::Session {
+    fn session_with(channels: Vec<Channel>) -> sde_core::Session {
+        sde_core::Session {
             channels: channels.into_iter().map(|c| (c.name.clone(), c)).collect(),
             laps: vec![],
             metadata: std::collections::HashMap::new(),
-            key_channel_map: tda_core::KeyChannelMap::default(),
+            key_channel_map: sde_core::KeyChannelMap::default(),
             file_name: "test".into(),
         }
     }
@@ -310,13 +310,13 @@ mod tests {
     }
 
     /// End-to-end sanity check against the real synthetic fixture used by
-    /// `tda-motec`/`tda-core`'s own tests, rather than only synthetic
+    /// `sde-motec`/`sde-core`'s own tests, rather than only synthetic
     /// in-memory data.
     #[test]
     fn value_at_against_synthetic_fixture() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../tda-formats/motec/tests/fixtures/synthetic.ld");
-        let session = tda_core::Session::load_motec(&fixture)
+            .join("../sde-formats/motec/tests/fixtures/synthetic.ld");
+        let session = sde_core::Session::load_motec(&fixture)
             .unwrap_or_else(|e| panic!("failed to load {fixture:?}: {e}"));
 
         let channel = pick_default_channel(&session).expect("fixture has channels");

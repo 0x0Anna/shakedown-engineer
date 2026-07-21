@@ -2,11 +2,11 @@
 //!
 //! This crate is deliberately UI-free and dependency-light (per
 //! PROJECT_PLAN.md's modularity principles) so it can be reused outside
-//! the `tda-app` GUI — as a CLI tool, or in another project entirely.
+//! the `sde-app` GUI — as a CLI tool, or in another project entirely.
 //!
 //! Field names on [`LdFile`] / [`LdChannel`] intentionally mirror
 //! `TrackDataAnalysis`'s `data/base.py` `LogFile`/`Channel` dataclasses,
-//! since `tda-core` builds its `Session` model directly on top of this
+//! since `sde-core` builds its `Session` model directly on top of this
 //! crate's output.
 //!
 //! The binary layout and the physical-value conversion formula

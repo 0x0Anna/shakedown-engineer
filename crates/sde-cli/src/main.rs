@@ -1,4 +1,4 @@
-//! `dump_channels` — minimal CLI proving the tda-motec parser -> tda-core
+//! `dump_channels` — minimal CLI proving the sde-motec parser -> sde-core
 //! `Session` data-model boundary works, ahead of any GUI (milestone 2's
 //! goal per PROJECT_PLAN.md).
 //!
@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let session = match tda_core::Session::load_motec(&path) {
+    let session = match sde_core::Session::load_motec(&path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("failed to load {}: {e}", path.display());

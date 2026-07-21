@@ -2,7 +2,7 @@
 //! channel via the state machine ported from TDA's `data/motec.py`
 //! `MOTEC()` (see PROJECT_PLAN.md, milestone 1 notes).
 //!
-//! Fixture: `crates/tda-formats/motec/tests/fixtures/synthetic_with_laps.ld`,
+//! Fixture: `crates/sde-formats/motec/tests/fixtures/synthetic_with_laps.ld`,
 //! generated the same way as the milestone-1 `synthetic.ld` fixture (via
 //! `ldparser`'s `ldData.frompd(df).write(path)`), with a hand-constructed
 //! `Beacon` channel exercising: two "real" lap triggers (`v == 100` and
@@ -40,7 +40,7 @@ fn splits_laps_from_beacon_channel() {
     const EPSILON: f64 = 1e-6;
 
     let fixtures_dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tda-formats/motec/tests/fixtures");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../sde-formats/motec/tests/fixtures");
     let ld_path = fixtures_dir.join("synthetic_with_laps.ld");
     let expected_path = fixtures_dir.join("synthetic_with_laps_expected.json");
 
@@ -51,7 +51,7 @@ fn splits_laps_from_beacon_channel() {
             .unwrap_or_else(|e| panic!("failed to parse {expected_path:?}: {e}"))
     };
 
-    let session = tda_core::Session::load_motec(&ld_path)
+    let session = sde_core::Session::load_motec(&ld_path)
         .unwrap_or_else(|e| panic!("failed to load {ld_path:?}: {e}"));
 
     assert!(
