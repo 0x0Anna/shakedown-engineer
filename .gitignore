@@ -17,5 +17,9 @@
 Thumbs.db
 .DS_Store
 
+# working directories
+.working/**
+.work/**
+
 # Sample Log Data
 .sample-data/**

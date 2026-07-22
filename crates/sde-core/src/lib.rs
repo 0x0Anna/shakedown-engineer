@@ -16,6 +16,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+pub mod mathexpr;
+
 pub use sde_motec::LdError;
 
 /// A single telemetry channel. Field names mirror TDA's `Channel`

@@ -1,32 +1,231 @@
-import { Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, LineEdit, ComboBox, ListView, ScrollView } from "std-widgets.slint";
 
-// Milestone 3 minimal shell: a title bar, an "open file" button, a single
-// hardcoded channel plotted as a line graph, and a draggable vertical
-// cursor over it. Declarative markup only — all data/logic lives in Rust
-// (src/main.rs, src/graph.rs) per PROJECT_PLAN.md's stated preference for
-// keeping markup separate from logic.
+// Milestone 5 shell: a title bar, an "open file" button, a searchable
+// channel list + lap picker/comparison sidebar, and a worksheet of
+// channel docks (one line graph per selected channel, each able to
+// overlay several laps at once, sharing one draggable vertical time
+// cursor and one non-linear-editor-style zoom/pan window), laid out
+// stacked, side-by-side, or in a grid. Declarative markup only — all
+// data/logic lives in Rust (src/main.rs, src/graph.rs) per
+// PROJECT_PLAN.md's stated preference for keeping markup separate from
+// logic.
+
+export struct SeriesData {
+    commands: string,
+    color: color,
+    // Channel name this trace belongs to, but only set (non-"") when a
+    // dock overlays more than one channel — otherwise the dock header
+    // already names the (single) channel and the top `legend` property
+    // already names laps when comparing, so this would be redundant.
+    label: string,
+}
+
+export struct DockData {
+    channel-name: string,
+    channel-units: string,
+    // One series per (channel, lap) combination in the dock: normally
+    // just one channel x one lap/"All"; more when comparing laps and/or
+    // overlaying multiple channels in one dock (see
+    // `graph::build_lap_comparison_plot`).
+    series: [SeriesData],
+    view-width: float,
+    view-height: float,
+    has-data: bool,
+    status-text: string,
+    // Precomputed by Rust (a fixed 2-column grid) so the "Grid" layout
+    // mode below never needs modulo/division inside markup.
+    grid-row: int,
+    grid-col: int,
+}
+
+export struct LegendEntry {
+    label: string,
+    color: color,
+}
+
+// One channel's graph row: header (name/units, cursor readout, remove
+// button) plus the graph itself (traces, shared cursor line, and the
+// scroll-wheel zoom/pan hookup). Factored out of `AppWindow` so the
+// three worksheet layout modes below (stacked/side-by-side/grid) can
+// each place the same dock content without tripling the markup.
+component DockPanel {
+    in property <DockData> dock;
+    in property <bool> cursor-visible;
+    in property <float> cursor-fraction;
+    in property <string> cursor-value;
+
+    callback removed();
+    callback cursor-moved(float); // fraction 0..1 across the graph width
+    callback zoom-scrolled(float, float, float); // delta-x, delta-y, cursor fraction
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 2px;
+
+        HorizontalBox {
+            padding: 0px;
+            spacing: 8px;
+            Text {
+                text: root.dock.channel-name + " (" + root.dock.channel-units + ")";
+                font-size: 13px;
+                color: gray;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            Text {
+                // Kept out of `DockData` so dragging the cursor only has
+                // to update this one small string, not rebuild every
+                // dock's path commands. Fixed width (rather than sizing
+                // to content) so the row doesn't reflow — and the "x"
+                // button doesn't visibly shift — every time the value's
+                // digit count changes as the cursor moves.
+                text: root.cursor-visible ? root.cursor-value : "";
+                font-size: 13px;
+                color: gray;
+                min-width: 160px;
+                horizontal-alignment: right;
+                overflow: elide;
+            }
+            Button {
+                text: "x";
+                width: 22px;
+                clicked => { root.removed(); }
+            }
+        }
+
+        // Per-channel color key, shown only for an overlay dock (more
+        // than one channel plotted together) — a plain single-channel
+        // dock's header already names its one channel, and lap
+        // comparison already has its own top-level legend.
+        if root.dock.series.length > 1 && root.dock.series[0].label != "": HorizontalLayout {
+            spacing: 10px;
+            for s in root.dock.series: HorizontalLayout {
+                spacing: 4px;
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    background: s.color;
+                }
+                Text {
+                    text: s.label;
+                    font-size: 10px;
+                    color: gray;
+                }
+            }
+        }
+
+        Rectangle {
+            background: #1b1e24;
+            border-width: 1px;
+            border-color: #3a3f4b;
+            vertical-stretch: 1;
+            clip: true;
+
+            if !root.dock.has-data: Text {
+                text: root.dock.status-text;
+                font-size: 12px;
+                color: gray;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+
+                moved => {
+                    if (self.pressed && self.width > 0px) {
+                        root.cursor-moved(max(0.0, min(1.0, self.mouse-x / self.width)));
+                    }
+                }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && self.width > 0px) {
+                        root.cursor-moved(max(0.0, min(1.0, self.mouse-x / self.width)));
+                    }
+                }
+                scroll-event(event) => {
+                    root.zoom-scrolled(event.delta-x / 1px, event.delta-y / 1px, max(0.0, min(1.0, self.mouse-x / self.width)));
+                    accept
+                }
+            }
+
+            for s in root.dock.series: Path {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                commands: s.commands;
+                stroke: s.color;
+                stroke-width: 1.5px;
+                viewbox-width: root.dock.view-width;
+                viewbox-height: root.dock.view-height;
+                // Path defaults to `fit: contain`, which preserves the
+                // viewbox's aspect ratio and letterboxes — since the
+                // viewbox is always a 1000x1000 square (see
+                // `VIEW_WIDTH`/`VIEW_HEIGHT` in main.rs) but docks are
+                // wide rectangles, that left large blank margins on
+                // either side of the trace. `fill` stretches x/y
+                // independently to the element's actual size instead,
+                // which is what a time/value plot needs.
+                fit: fill;
+            }
+
+            if root.cursor-visible: Rectangle {
+                x: root.cursor-fraction * parent.width - 1px;
+                y: 0px;
+                width: 2px;
+                height: 100%;
+                background: #ff5a5a;
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "sde-app";
-    preferred-width: 960px;
-    preferred-height: 620px;
+    preferred-width: 1100px;
+    preferred-height: 640px;
 
     // -- state provided by Rust --
     in property <string> window-title: "sde-app — No file loaded";
-    in property <string> channel-name: "";
-    in property <string> channel-units: "";
     in property <string> status-text: "Open a MoTeC .ld file to begin.";
-    in property <string> path-commands: "";
-    in property <float> view-width: 1000;
-    in property <float> view-height: 1000;
-    in property <bool> has-data: false;
     in property <bool> cursor-visible: false;
     in property <float> cursor-fraction: 0; // 0..1 across the plotted x range
     in property <string> cursor-time-text: "";
-    in property <string> cursor-value-text: "";
+    in property <[string]> cursor-values: []; // aligned with `docks`
+    in property <[string]> channel-names: []; // filtered by channel-filter-text
+    in property <[bool]> channel-active: []; // aligned with channel-names: on a dock already
+    in property <[bool]> channel-overlay-pending: []; // aligned with channel-names: queued (Ctrl+click) for a new overlay dock
+    in property <[string]> overlay-pending-names: []; // the queue itself, for display
+    in property <string> channel-filter-text: "";
+    in property <[string]> lap-labels: []; // "All", "Lap 1 (...)", ...
+    in property <int> current-lap-index: 0;
+    in property <[string]> compare-lap-labels: []; // "1", "2", ... one per lap
+    in property <[bool]> compare-lap-active: []; // aligned with compare-lap-labels
+    in property <string> compare-status-text: ""; // e.g. "Comparing 2 laps"; "" when not comparing
+    in property <[LegendEntry]> legend: []; // populated only while comparing laps
+    in property <[DockData]> docks: []; // one row per channel added to the worksheet
+    in-out property <string> math-name-text: ""; // cleared by Rust after a successful add
+    in-out property <string> math-formula-text: "";
+    in property <string> math-channel-error: ""; // shown after a failed add
+    in property <[string]> math-channel-names: []; // created math channels, for removal chips
+    in property <string> zoom-range-text: ""; // e.g. "12.0s - 48.0s of 120.7s"; "" when fully zoomed out
+    in-out property <int> layout-mode: 0; // 0 = stacked, 1 = side-by-side, 2 = grid; pure UI state
 
     // -- callbacks into Rust --
     callback open-file();
     callback cursor-moved(float); // fraction 0..1 across the graph width
+    callback channel-filter-changed(string);
+    callback dock-selected(string); // toggles a channel in/out of the worksheet as its own dock
+    callback dock-removed(int); // index into `docks`
+    callback channel-overlay-toggled(string); // toggles a channel in/out of the overlay queue
+    callback overlay-add-requested(); // create one new dock overlaying the queued channels
+    callback overlay-cleared(); // empty the overlay queue without creating a dock
+    callback lap-selected(int); // index into lap-labels
+    callback compare-lap-toggled(int); // index into compare-lap-labels
+    callback compare-cleared(); // exit comparison mode entirely, back to the plain lap dropdown
+    callback math-channel-add-requested(string, string); // name, formula
+    callback math-channel-removed(int); // index into math-channel-names
+    callback zoom-scrolled(float, float, float); // delta-x, delta-y, cursor fraction
+    callback zoom-reset();
 
     VerticalBox {
         padding: 10px;
@@ -44,67 +243,384 @@ export component AppWindow inherits Window {
                 vertical-alignment: center;
                 font-weight: 600;
             }
-        }
-
-        Text {
-            text: root.has-data
-                ? root.channel-name + " (" + root.channel-units + ")"
-                : root.status-text;
-            font-size: 13px;
-            color: gray;
-        }
-
-        Rectangle {
-            background: #1b1e24;
-            border-width: 1px;
-            border-color: #3a3f4b;
-            vertical-stretch: 1;
-
-            graph-area := TouchArea {
-                width: 100%;
-                height: 100%;
-
-                moved => {
-                    if (self.pressed && self.width > 0px) {
-                        root.cursor-moved(max(0.0, min(1.0, self.mouse-x / self.width)));
-                    }
-                }
-                pointer-event(event) => {
-                    if (event.kind == PointerEventKind.down && self.width > 0px) {
-                        root.cursor-moved(max(0.0, min(1.0, self.mouse-x / self.width)));
-                    }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: "Lap:";
+                vertical-alignment: center;
+            }
+            // Whenever the compare chips (below) have any lap selected,
+            // they take over entirely — the dropdown's own selection is
+            // ignored (see `current_ranges` in main.rs). Rather than
+            // leave the dropdown showing a stale, now-irrelevant value
+            // (confusing: which one is actually in effect?), swap it for
+            // an explicit "Comparing N laps" indicator with its own way
+            // back out, so exactly one control is ever showing what's
+            // active.
+            if root.compare-status-text == "": ComboBox {
+                width: 160px;
+                model: root.lap-labels;
+                current-index: root.current-lap-index;
+                selected(value) => {
+                    root.lap-selected(self.current-index);
                 }
             }
-
-            Path {
-                x: 0px;
-                y: 0px;
-                width: 100%;
-                height: 100%;
-                commands: root.path-commands;
-                stroke: #4ea1ff;
-                stroke-width: 1.5px;
-                viewbox-width: root.view-width;
-                viewbox-height: root.view-height;
+            if root.compare-status-text != "": HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: root.compare-status-text;
+                    vertical-alignment: center;
+                    font-size: 12px;
+                    color: #4ea1ff;
+                }
+                Button {
+                    text: "Clear";
+                    clicked => { root.compare-cleared(); }
+                }
             }
-
-            if root.cursor-visible: Rectangle {
-                x: root.cursor-fraction * parent.width - 1px;
-                y: 0px;
-                width: 2px;
-                height: 100%;
-                background: #ff5a5a;
+            Text {
+                text: "Compare:";
+                vertical-alignment: center;
+            }
+            // Fixed-width and horizontally scrollable rather than an
+            // unbounded row: a long circuit session can have 20-50+
+            // laps, which would otherwise overflow off the edge of the
+            // window with no way to reach the later ones.
+            ScrollView {
+                width: 200px;
+                height: 30px;
+                vertical-scrollbar-policy: always-off;
+                HorizontalLayout {
+                    spacing: 2px;
+                    for lbl[i] in root.compare-lap-labels: Rectangle {
+                        width: 22px;
+                        height: 22px;
+                        background: (i < root.compare-lap-active.length && root.compare-lap-active[i])
+                            ? #4ea1ff : #2a2f3a;
+                        border-radius: 3px;
+                        TouchArea {
+                            clicked => { root.compare-lap-toggled(i); }
+                        }
+                        Text {
+                            text: lbl;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+                    }
+                }
             }
         }
 
         HorizontalBox {
             padding: 0px;
-            spacing: 20px;
+            spacing: 8px;
+
             Text {
-                text: root.cursor-visible ? "t = " + root.cursor-time-text + " ms" : "";
+                text: "Layout:";
+                vertical-alignment: center;
             }
-            Text {
-                text: root.cursor-visible ? "value = " + root.cursor-value-text : "";
+            HorizontalLayout {
+                spacing: 2px;
+                // Hand-rolled toggle chips rather than `Button {
+                // checkable: true; checked: ...; }`: `Button`'s built-in
+                // checked-toggle assigns to its own `checked` property
+                // internally on click, which severs any external
+                // declarative binding on it after the first click — so a
+                // `checked: root.layout-mode == N` binding would stop
+                // updating and the highlight would get stuck. A plain
+                // Rectangle whose background is a pure expression of
+                // `layout-mode` has no such internal state to fight with.
+                Rectangle {
+                    width: 70px;
+                    height: 24px;
+                    background: root.layout-mode == 0 ? #4ea1ff : #2a2f3a;
+                    border-radius: 3px;
+                    TouchArea {
+                        clicked => { root.layout-mode = 0; }
+                    }
+                    Text {
+                        text: "Stacked";
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                }
+                Rectangle {
+                    width: 100px;
+                    height: 24px;
+                    background: root.layout-mode == 1 ? #4ea1ff : #2a2f3a;
+                    border-radius: 3px;
+                    TouchArea {
+                        clicked => { root.layout-mode = 1; }
+                    }
+                    Text {
+                        text: "Side-by-side";
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                }
+                Rectangle {
+                    width: 50px;
+                    height: 24px;
+                    background: root.layout-mode == 2 ? #4ea1ff : #2a2f3a;
+                    border-radius: 3px;
+                    TouchArea {
+                        clicked => { root.layout-mode = 2; }
+                    }
+                    Text {
+                        text: "Grid";
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                }
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            // Non-linear-video-editor-style timeline zoom: scroll (wheel
+            // or trackpad) over any dock zooms in/out around the pointer;
+            // shift-scroll/horizontal-swipe pans. This just shows the
+            // current window and offers a way back to fully zoomed out,
+            // since there's no on-canvas ruler/scrubber (yet).
+            if root.zoom-range-text != "": HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "Zoom: " + root.zoom-range-text;
+                    vertical-alignment: center;
+                    font-size: 12px;
+                    color: gray;
+                }
+                Button {
+                    text: "Reset zoom";
+                    clicked => { root.zoom-reset(); }
+                }
+            }
+        }
+
+        if root.legend.length > 0: HorizontalBox {
+            padding: 0px;
+            spacing: 16px;
+            for entry in root.legend: HorizontalLayout {
+                spacing: 4px;
+                Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    background: entry.color;
+                }
+                Text {
+                    text: entry.label;
+                    font-size: 12px;
+                    color: gray;
+                }
+            }
+        }
+
+        HorizontalBox {
+            padding: 0px;
+            spacing: 8px;
+            vertical-stretch: 1;
+
+            VerticalBox {
+                padding: 0px;
+                spacing: 4px;
+                width: 220px;
+
+                LineEdit {
+                    placeholder-text: "Search channels...";
+                    text: root.channel-filter-text;
+                    edited(text) => { root.channel-filter-changed(text); }
+                }
+                Text {
+                    text: "Click to plot; Ctrl+click to queue an overlay";
+                    font-size: 10px;
+                    color: gray;
+                    wrap: word-wrap;
+                }
+
+                ListView {
+                    vertical-stretch: 1;
+                    for name[i] in root.channel-names: Rectangle {
+                        height: 26px;
+                        background: (i < root.channel-overlay-pending.length && root.channel-overlay-pending[i])
+                            ? #4a3420
+                            : (i < root.channel-active.length && root.channel-active[i])
+                                ? #2a3040 : transparent;
+                        TouchArea {
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    if (event.modifiers.control) {
+                                        root.channel-overlay-toggled(name);
+                                    } else {
+                                        root.dock-selected(name);
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            x: 4px;
+                            text: name;
+                            vertical-alignment: center;
+                            height: 100%;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                if root.overlay-pending-names.length > 0: VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "Overlay queue:";
+                        font-size: 11px;
+                        color: gray;
+                    }
+                    for name in root.overlay-pending-names: Text {
+                        text: "  " + name;
+                        font-size: 11px;
+                        color: #ffb060;
+                        overflow: elide;
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Button {
+                            text: "Add overlay dock";
+                            clicked => { root.overlay-add-requested(); }
+                        }
+                        Button {
+                            text: "Clear";
+                            clicked => { root.overlay-cleared(); }
+                        }
+                    }
+                }
+
+                Text {
+                    text: "Math channel";
+                    font-size: 12px;
+                    color: gray;
+                }
+                LineEdit {
+                    text <=> root.math-name-text;
+                    placeholder-text: "Name";
+                }
+                LineEdit {
+                    text <=> root.math-formula-text;
+                    placeholder-text: "e.g. [Ground Speed] * 3.6";
+                }
+                Button {
+                    text: "Add math channel";
+                    clicked => {
+                        root.math-channel-add-requested(root.math-name-text, root.math-formula-text);
+                    }
+                }
+                if root.math-channel-error != "": Text {
+                    text: root.math-channel-error;
+                    font-size: 11px;
+                    color: #ff5a5a;
+                    wrap: word-wrap;
+                }
+                for name[i] in root.math-channel-names: HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: name;
+                        font-size: 11px;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    Button {
+                        text: "x";
+                        width: 18px;
+                        clicked => { root.math-channel-removed(i); }
+                    }
+                }
+            }
+
+            VerticalBox {
+                padding: 0px;
+                spacing: 8px;
+                vertical-stretch: 1;
+
+                if root.docks.length == 0: Text {
+                    text: root.status-text;
+                    font-size: 13px;
+                    color: gray;
+                }
+
+                if root.docks.length > 0 && root.layout-mode == 0: ListView {
+                    vertical-stretch: 1;
+                    for dock[i] in root.docks: Rectangle {
+                        height: 160px;
+                        DockPanel {
+                            width: 100%;
+                            height: 100%;
+                            dock: dock;
+                            cursor-visible: root.cursor-visible;
+                            cursor-fraction: root.cursor-fraction;
+                            cursor-value: i < root.cursor-values.length ? root.cursor-values[i] : "";
+                            removed => { root.dock-removed(i); }
+                            cursor-moved(f) => { root.cursor-moved(f); }
+                            zoom-scrolled(dx, dy, f) => { root.zoom-scrolled(dx, dy, f); }
+                        }
+                    }
+                }
+
+                if root.docks.length > 0 && root.layout-mode == 1: HorizontalLayout {
+                    vertical-stretch: 1;
+                    spacing: 8px;
+                    for dock[i] in root.docks: Rectangle {
+                        horizontal-stretch: 1;
+                        DockPanel {
+                            width: 100%;
+                            height: 100%;
+                            dock: dock;
+                            cursor-visible: root.cursor-visible;
+                            cursor-fraction: root.cursor-fraction;
+                            cursor-value: i < root.cursor-values.length ? root.cursor-values[i] : "";
+                            removed => { root.dock-removed(i); }
+                            cursor-moved(f) => { root.cursor-moved(f); }
+                            zoom-scrolled(dx, dy, f) => { root.zoom-scrolled(dx, dy, f); }
+                        }
+                    }
+                }
+
+                // Grid: a fixed 2-column layout using `grid-row`/`grid-col`
+                // precomputed on each `DockData` in Rust (avoids needing
+                // modulo/division inside markup). Absolutely positioned
+                // within one Rectangle rather than a Slint `GridLayout`,
+                // since the dock count/row count is dynamic.
+                if root.docks.length > 0 && root.layout-mode == 2: Rectangle {
+                    vertical-stretch: 1;
+                    for dock[i] in root.docks: Rectangle {
+                        x: dock.grid-col * (parent.width / 2);
+                        y: dock.grid-row * 200px;
+                        width: parent.width / 2 - 8px;
+                        height: 192px;
+                        DockPanel {
+                            width: 100%;
+                            height: 100%;
+                            dock: dock;
+                            cursor-visible: root.cursor-visible;
+                            cursor-fraction: root.cursor-fraction;
+                            cursor-value: i < root.cursor-values.length ? root.cursor-values[i] : "";
+                            removed => { root.dock-removed(i); }
+                            cursor-moved(f) => { root.cursor-moved(f); }
+                            zoom-scrolled(dx, dy, f) => { root.zoom-scrolled(dx, dy, f); }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.cursor-visible ? "t = " + root.cursor-time-text + " ms" : "";
+                }
             }
         }
     }

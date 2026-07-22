@@ -250,6 +250,274 @@ code reading and a generated synthetic `.ld` file (see below). Findings:
    behind the shared `LogFormat` trait.
 5. **Core UI parity** — worksheets/docks, channel search, lap selection/comparison,
    math channels (matching the original tool's baseline usefulness).
+   *(In progress, 2026-07-21)* Channel search + lap selection landed first, as the
+   most natural extension of milestone 3's single-graph view — see `crates/sde-app`:
+   - `graph.rs` gained `channel_names`/`filter_channel_names` (case-insensitive
+     substring match) and `lap_labels` (`"All"` at index 0, `"Lap N (duration)"`
+     per `session.laps` entry thereafter). `build_plot` now takes an
+     `Option<(f64, f64)>` time-range parameter — when `Some`, both the time axis
+     and the vertical value scaling are computed from that window alone (e.g. a
+     selected lap), not the whole channel; `None` preserves the old full-channel
+     behavior.
+   - `main.rs` now keeps the loaded `Session` alive in an `AppState` behind one
+     `Rc<RefCell<_>>` (previously only the plotted channel's raw arrays were kept
+     around; picking a different channel required reloading the file). A search
+     box filters a channel list sidebar (click to plot); a lap `ComboBox` in the
+     header restricts the graph to that lap's time window via the same
+     `build_plot` range parameter.
+   - `app.slint`: added a left sidebar (`LineEdit` search + `ListView` of channel
+     names, highlighting the active one) and a lap `ComboBox` in the title bar.
+   *(Worksheets/docks, 2026-07-21):* multiple channels can now be plotted at
+   once. `AppState.dock_channels: Vec<String>` replaced the single
+   `selected_channel`; clicking a channel in the sidebar toggles it in/out of
+   the worksheet (highlighted via a `channel-active: [bool]` array parallel to
+   the filtered `channel-names` list), each dock has a "x" remove button, and
+   `app.slint` renders one stacked graph row per dock (a new `DockData` Slint
+   struct — name/units/path-commands/dims/has-data/status-text — via a
+   `ListView` over `[DockData]`). All docks share one draggable cursor (each
+   dock keeps its own `TouchArea`, but since they're all the same width and
+   plotted over the same `current_range`, a fraction means the same timecode
+   in every dock); per-dock cursor readouts live in a separate parallel
+   `cursor-values: [string]` property so dragging the cursor only updates that
+   small array, not every dock's path string. `graph::build_plot`'s `range`
+   parameter (added for milestone 5's lap-selection work above) is now always
+   `Some(...)` — either the selected lap's window or `graph::session_time_range`
+   (new: `(0.0, last_lap.end_time)`) for "All" — so every dock's x-axis lines
+   up regardless of which channels are on the worksheet.
+   *(Lap comparison, 2026-07-21):* laps can now be overlaid per-dock instead
+   of only viewed one at a time. `graph.rs` gained `build_lap_comparison_plot`
+   (replaces `build_plot` for all dock rendering, including the plain
+   "All"/one-lap case, which is now just a 1-element `ranges` list): given a
+   list of `(start, end)` ranges it rebases each to lap-relative `t = 0`,
+   scales every trace off one shared time span (`shared_duration` — the
+   longest range) and one shared value range across *all* the ranges'
+   samples, so overlaid traces are a fair visual comparison, not
+   independently auto-scaled. A range with no samples for that channel is
+   silently omitted from the output rather than erroring. In `main.rs`,
+   `AppState.compare_lap_indices: Vec<usize>` (1-based lap numbers, sorted)
+   holds the active comparison set; non-empty overrides the plain
+   `selected_lap_index`. `current_ranges` picks between the two. The UI
+   (`app.slint`) grew a row of small numbered toggle chips ("Compare:") next
+   to the lap `ComboBox` — picking from the `ComboBox` clears any active
+   comparison, and vice versa isn't needed since comparison chips are
+   independent toggles. `DockData.path-commands` (one string) became
+   `DockData.series: [SeriesData]` (`{ commands, color }` — a new Slint
+   struct), rendered as one `Path` per series via `for s in dock.series`; a
+   4-color palette (`SERIES_COLORS`/`series_color`) is cycled through and
+   also drives a legend row (new `LegendEntry`/`legend` property, shown only
+   while comparing). Per-dock cursor readouts now show one value per active
+   range, pipe-separated (e.g. `"12.3 | 15.0"`), each looked up by clamping
+   the lap-relative cursor time into that specific lap's own
+   `(start, end)` before calling `value_at_raw` — necessary because a
+   channel's raw timecodes run continuously across the whole session, so an
+   unclamped lookup near a short lap's end could silently read into the
+   next lap's data.
+   *(Math channels, 2026-07-21 — milestone complete):* new `sde_core::mathexpr`
+   module (UI-free, in `sde-core` rather than `sde-app`, per the workspace's
+   modularity principles) adds a small hand-written recursive-descent
+   parser/evaluator for arithmetic expressions over existing channels — e.g.
+   `[Ground Speed] * 3.6`, `abs(RPM - 6000)`. Grammar: standard `+ - * /`
+   precedence, right-associative `^`, unary minus, parens, and four
+   functions (`abs`, `sqrt` — 1 arg; `min`, `max` — 2 args). Channel names
+   are referenced either as a bare identifier (`RPM`) or bracketed
+   (`[Ground Speed]`, required for names containing spaces). Evaluation
+   (`evaluate_math_channel(session, name, expr) -> Result<Channel, MathError>`)
+   picks the *first*-referenced channel's timecodes as the output's sample
+   base and resamples every other referenced channel onto those timecodes
+   via each channel's own `interpolate` semantics — so an expression mixing
+   channels recorded at different rates follows whichever channel it names
+   first. Division by zero yields `±inf`/`NaN`, not an error (only syntax
+   errors, unknown channels/functions, wrong arity, and "expression
+   references no channel at all" are `MathError`s). In `sde-app`, a
+   name/formula input pair in the sidebar (wired via
+   `math-channel-add-requested`/`math-channel-removed` callbacks) calls this
+   and, on success, inserts the resulting `Channel` directly into the live
+   `Session.channels` map — so a math channel behaves exactly like any
+   parsed one afterward (searchable, dockable, comparable across laps).
+   Redefining an existing *math* channel by reusing its name overwrites it
+   in place; reusing the name of a real/parsed channel is rejected, so math
+   channels can never shadow actual telemetry data.
+
+   All four milestone-5 sub-features (worksheets/docks, channel search, lap
+   selection/comparison, math channels) are now implemented — see
+   `crates/sde-app` and `crates/sde-core/src/mathexpr.rs`.
+
+   *(Post-milestone polish, 2026-07-21, prompted by reviewing a screenshot of
+   the worksheet):* a real screenshot of the lap-comparison view (against
+   `.sample-data/CDA2 AMG EVO PAN RunData.ld`, a 5-lap ACC session) surfaced
+   one bug and two feature gaps:
+   - **Bug fix:** `TC`/`THROTTLE`/`BRAKE` traces appeared to vanish outside a
+     narrow middle band. Verified via `dump_channels` (now also prints each
+     channel's `t=[first..last]` timecode range and every lap's
+     start/end/duration) that this wasn't a data or lap-boundary problem —
+     those channels have continuous samples across the full session, and lap
+     boundaries land where expected. The real cause: a channel that sits flat
+     at its own min or max for long stretches (e.g. `BRAKE` at 0 outside a
+     braking zone) plotted exactly on the dock's top/bottom border pixel and
+     became visually indistinguishable from it. Fixed with a new
+     `graph::value_scale` helper (used by both `build_plot` and
+     `build_lap_comparison_plot`) that pads the value axis by 5% top and
+     bottom (`VALUE_MARGIN_FRACTION`) so a flat trace at the extreme always
+     plots a few pixels shy of the border.
+   - **Timeline zoom** (non-linear-video-editor style): `graph.rs` gained
+     `zoom_scroll` (pure, updates a `(start, end)` fraction-of-full-range
+     window from one wheel/trackpad scroll event — vertical scroll zooms in
+     around the cursor's position so that point stays fixed, horizontal
+     scroll/shift-scroll pans, both clamped to `[0, 1]` and never narrower
+     than `MIN_ZOOM_WIDTH`) and `apply_zoom` (narrows a set of comparison
+     ranges to a zoom window, intersecting each range independently so
+     zooming still means the same lap-relative moment across every compared
+     lap). `AppState.zoom: Option<(f64, f64)>` holds the active window
+     (`None` = fully zoomed out); it's cleared whenever the lap
+     selection/comparison set changes, since a zoom fraction of the old
+     set's duration wouldn't mean the same thing against a new one. Wired to
+     each dock's graph via Slint `TouchArea`'s `scroll-event`; a "Reset zoom"
+     button and a "12.0s - 48.0s of 120.7s"-style readout appear only while
+     zoomed in.
+   - **Worksheet layout modes:** stacked (the original, one full-width row
+     per channel), side-by-side (one horizontal row), and a fixed 2-column
+     grid. Required factoring the per-dock markup (header + graph + shared
+     cursor line + scroll handling) out of the single stacked `ListView` into
+     a reusable `DockPanel` sub-component in `app.slint`, instantiated once
+     per layout mode's container. Grid placement (`DockData.grid-row`/
+     `grid-col`) is computed in Rust (`i as i32 / GRID_COLUMNS`, `% GRID_COLUMNS`)
+     rather than in markup, keeping arithmetic out of the `.slint` file per
+     the project's markup/logic split. `layout-mode` is pure UI state (an
+     `in-out property` on `AppWindow`, no Rust round-trip) since it doesn't
+     affect what's plotted, only how the docks are arranged.
+
+   *(Second polish pass, 2026-07-21, from two more real screenshots + user
+   testing):* two more bugs and one more feature:
+   - **Bug fix — Stacked/Side-by-side showed no charts (Grid did):** the new
+     `DockPanel` instances forgot `width: 100%; height: 100%;` in those two
+     layout containers (Grid's happened to get it). Without it, `DockPanel`'s
+     root `VerticalLayout` sizes itself to its *own* natural/minimum content
+     size — the header row has one (text height), but nothing gave the graph
+     `Rectangle` below (`vertical-stretch: 1`) any space to stretch into, so
+     it collapsed to ~0px tall. Fixed by adding the same explicit
+     `width`/`height` the Grid instantiation already had.
+   - **Bug fix — zoomed view didn't fill the dock width:** `build_plot`/
+     `build_lap_comparison_plot` only ever plotted real samples strictly
+     inside `[start, end]`, so a window that doesn't land exactly on a
+     sample's timestamp (the common case once zoomed into an arbitrary
+     sub-range) left a gap between the trace and each edge — invisible at
+     the full lap/session zoom level (gap negligible vs. the whole span) but
+     obvious once zoomed in tight (gap now a large fraction of the visible
+     width). Fixed with a new `graph::windowed_samples` helper, used by both
+     plotting functions: after the usual `[start, end]` filter, it
+     synthesizes one extra point at each edge the real samples don't already
+     reach (via the same interpolate-or-hold `value_at` lookup used for
+     cursor readouts), so the line always touches both edges whenever the
+     channel has *any* real overlap with the window. Deliberately returns no
+     points (not a synthesized flat line) when the channel has zero overlap
+     with the window at all, so a genuinely out-of-range dock still reports
+     "no samples" rather than fabricating data.
+   - **Channel overlay mode:** a dock can now plot more than one channel at
+     once (e.g. `BRAKE`+`THROTTLE` together), the same way lap comparison
+     overlays multiple laps — and the two compose (an overlay dock can also
+     show each of its channels across multiple compared laps). Interaction:
+     Ctrl+click a sidebar channel to queue it (highlighted orange, separate
+     from the existing blue "already on the worksheet" highlight) instead of
+     immediately creating a dock; an "Add overlay dock"/"Clear" pair appears
+     once the queue is non-empty. `AppState.dock_channels` changed from
+     `Vec<String>` to `Vec<Vec<String>>` (one dock = one or more channel
+     names) — a plain click still toggles a size-1 group exactly as before,
+     so the common single-channel workflow is unchanged. In `replot`, each
+     channel in a group still goes through `build_lap_comparison_plot`
+     independently (so every channel keeps its *own* value scale within the
+     shared dock, correct when overlaying channels with different units —
+     e.g. RPM alongside a 0-100 percentage), and every resulting series
+     across every channel in the group gets a sequential color from the
+     (now 8-entry, up from 4) `SERIES_COLORS` palette. `SeriesData` gained a
+     `label` field (the channel name), populated only when a dock has more
+     than one channel — `DockPanel` renders a small color-keyed legend row
+     from it in that case, leaving single-channel docks and the existing
+     lap-comparison legend untouched. Cursor readouts prefix each channel's
+     value(s) with its name the same way, only when the group has more than
+     one channel (`cursor_text_for_group`).
+
+   *(Third polish pass, 2026-07-21, from user testing):* the previous pass's
+   "zoom doesn't fill the width" fix (`windowed_samples`, boundary-extending
+   the plotted samples) turned out to only be a secondary factor — the real
+   cause, also explaining the *unzoomed* "empty space before/after every
+   plot" report, was that Slint's `Path` element defaults to `fit: contain`
+   (SVG `preserveAspectRatio="meet"` equivalent): it preserves the viewbox's
+   aspect ratio and letterboxes rather than stretching x/y independently.
+   Every dock uses a square 1000x1000 viewbox (`VIEW_WIDTH`/`VIEW_HEIGHT` in
+   `main.rs`) rendered into a wide rectangular dock, so `contain` was scaling
+   by the limiting (height) dimension only and leaving large blank margins on
+   both sides — at any zoom level, not just when zoomed in tight. Fixed with
+   one line, `fit: fill;`, on the `Path` in `DockPanel`. Two more UI bugs
+   fixed in the same pass:
+   - **Layout-mode highlight got stuck on the wrong button:** the "Grid" /
+     "Stacked" / "Side-by-side" toggle used `Button { checkable: true;
+     checked: root.layout-mode == N; }`. `Button`'s internal click handler
+     assigns to its own `checked` property (`root.checked = !root.checked`)
+     before invoking the public `clicked` callback — and in Slint, an
+     internal imperative assignment to a property permanently replaces any
+     external declarative binding on it. So after the *first* click, the
+     `checked: root.layout-mode == N` binding was gone and that button's
+     highlight simply stopped updating, no matter which layout was actually
+     active. Fixed by dropping `Button` for these three and hand-rolling the
+     toggle as a plain `Rectangle` (background driven purely by
+     `root.layout-mode == N`) with its own `TouchArea`, the same pattern
+     already used for the compare-lap chips — no internal state to fight
+     with.
+   - **Docks visibly jumped when dragging the cursor:** the per-dock cursor
+     readout `Text` in `DockPanel`'s header had no fixed width, so every
+     cursor move changed its content's character count (e.g. `"n/a"` vs.
+     `"80.123 | 20.456"`), which reflowed the whole header row (and, since
+     row height can be affected by reflow in some layouts, visibly shifted
+     the dock). Fixed by giving it a fixed `min-width: 160px` and
+     right-aligning it, so its box size no longer depends on content length.
+
+   *(Fourth polish pass, 2026-07-21, from user feedback on the updated
+   screenshot):* two UX gaps in the lap comparison controls, raised as
+   questions rather than bug reports but both real:
+   - **"Does the dropdown get overridden by the compare buttons?"** — yes
+     (`current_ranges` in main.rs gives the compare-chip selection full
+     priority over `selected_lap_index` whenever any chip is active), but
+     the dropdown kept showing its stale last value with no indication it
+     was being ignored, which is exactly the confusing part. Fixed by making
+     the two mutually exclusive *in the UI*, not just in the underlying
+     logic: whenever any compare chip is active, the `ComboBox` is replaced
+     with a plain "Comparing N laps" indicator plus a "Clear" button
+     (`compare-status-text`/`compare-cleared`) that exits back to dropdown
+     mode. Exactly one control is ever visible for "what lap selection is in
+     effect," instead of two that can silently disagree.
+   - **"What happens with 20-50 laps?"** — previously nothing good: the
+     compare-chip row was an unbounded `HorizontalLayout`, so it would have
+     just overflowed off the right edge of the window with no way to reach
+     later laps. Wrapped it in a fixed-width (`200px`) `ScrollView`
+     (horizontal-scrollbar-policy: as-needed, vertical: always-off) so it
+     stays bounded and reachable regardless of lap count. (The plain lap
+     `ComboBox` was already fine at any size — `std-widgets`' dropdown
+     scrolls internally.)
+
+   *(Fifth polish pass, 2026-07-21 — milestone 5 closed out):* trackpad
+   scroll-axis locking, the last requested item. Previously every
+   `zoom-scrolled` event applied both `delta_x` (pan) and `delta_y` (zoom)
+   independently whenever either was nonzero — fine for a plain mouse wheel
+   (which only ever reports `delta_y`), but trackpads report a nonzero value
+   on *both* axes on nearly every event, even during an intended single-axis
+   swipe. Net effect: panning horizontally would also drift the zoom level
+   (and vice versa) from incidental diagonal jitter. Fixed by locking each
+   scroll *gesture* to one axis for its whole duration rather than deciding
+   per event:
+   - `graph::dominant_scroll_axis(delta_x, delta_y) -> ScrollAxis` (pure,
+     tested) picks whichever axis a single event's deltas favor (ties go to
+     `Zoom`, so a plain vertical wheel — which reports `delta_x == 0.0` —
+     never accidentally locks to `Pan`).
+   - `AppState.scroll_gesture: Option<(ScrollAxis, Instant)>` remembers which
+     axis the *current* gesture locked to and when its last event arrived.
+     The `zoom_scrolled` handler only calls `dominant_scroll_axis` (re-
+     deciding the lock) when there's no gesture in progress or the previous
+     one went quiet for `SCROLL_GESTURE_TIMEOUT` (400ms); otherwise it keeps
+     the existing lock regardless of the current event's own deltas.
+   - Whichever axis isn't locked has its delta zeroed out entirely before
+     reaching `graph::zoom_scroll` — not just "which effect wins" but "the
+     other axis's input is discarded outright" — so off-axis jitter can't
+     leak through even partially.
 6. **`sde-setup`** — setup sheet data model + diff view between two setups. First
    genuinely new (non-port) feature.
 7. **`sde-analysis`** — derived channels layered onto graphs: damper velocity

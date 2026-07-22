@@ -45,6 +45,15 @@ fn main() -> ExitCode {
         println!("Venue: {venue}");
     }
     println!("Laps: {}", session.laps.len());
+    for lap in &session.laps {
+        println!(
+            "  Lap {:<3} start={:>10.1}ms end={:>10.1}ms dur={:>8.1}ms",
+            lap.num + 1,
+            lap.start_time,
+            lap.end_time,
+            lap.end_time - lap.start_time
+        );
+    }
     println!("Channels: {}", session.channels.len());
     println!();
 
@@ -61,9 +70,11 @@ fn main() -> ExitCode {
             .collect();
 
         println!(
-            "{name:<24} unit={:<8} samples={:<6} first {}: [{}]",
+            "{name:<24} unit={:<8} samples={:<6} t=[{:.1}..{:.1}] first {}: [{}]",
             channel.units,
             channel.values.len(),
+            channel.timecodes.first().copied().unwrap_or(0.0),
+            channel.timecodes.last().copied().unwrap_or(0.0),
             preview.len().min(PREVIEW_SAMPLES),
             preview.join(", ")
         );
