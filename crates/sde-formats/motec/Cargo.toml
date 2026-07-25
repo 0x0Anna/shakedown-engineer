@@ -7,7 +7,7 @@ description = "Parser for MoTeC LD binary telemetry log files (part of the sde-f
 
 [dependencies]
 binrw = "0.15"
-thiserror = "1"
+thiserror = "2"
 roxmltree = "0.20"
 
 [dev-dependencies]
