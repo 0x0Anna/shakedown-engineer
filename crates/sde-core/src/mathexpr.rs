@@ -114,12 +114,15 @@ fn tokenize(input: &str) -> Result<Vec<Token>, MathError> {
         } else if c == '[' {
             let start = i + 1;
             let Some(end_offset) = chars[start..].iter().position(|&c| c == ']') else {
-                return Err(MathError::Parse("unterminated '[' channel reference".into()));
+                return Err(MathError::Parse(
+                    "unterminated '[' channel reference".into(),
+                ));
             };
             let name: String = chars[start..start + end_offset].iter().collect();
             tokens.push(Token::Ident(name));
             i = start + end_offset + 1;
-        } else if c.is_ascii_digit() || (c == '.' && chars.get(i + 1).is_some_and(char::is_ascii_digit))
+        } else if c.is_ascii_digit()
+            || (c == '.' && chars.get(i + 1).is_some_and(char::is_ascii_digit))
         {
             let start = i;
             while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
@@ -535,7 +538,9 @@ mod tests {
     fn function_calls_abs_sqrt_min_max() {
         let session = session_with(vec![channel("X", vec![0.0], vec![-9.0])]);
         assert_eq!(
-            evaluate_math_channel(&session, "y", "abs(X)").unwrap().values,
+            evaluate_math_channel(&session, "y", "abs(X)")
+                .unwrap()
+                .values,
             vec![9.0]
         );
         assert_eq!(
@@ -545,11 +550,15 @@ mod tests {
             vec![3.0]
         );
         assert_eq!(
-            evaluate_math_channel(&session, "y", "min(X, 0)").unwrap().values,
+            evaluate_math_channel(&session, "y", "min(X, 0)")
+                .unwrap()
+                .values,
             vec![-9.0]
         );
         assert_eq!(
-            evaluate_math_channel(&session, "y", "max(X, 0)").unwrap().values,
+            evaluate_math_channel(&session, "y", "max(X, 0)")
+                .unwrap()
+                .values,
             vec![0.0]
         );
     }

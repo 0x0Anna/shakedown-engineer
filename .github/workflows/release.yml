@@ -22,11 +22,11 @@ jobs:
         include:
           - os: windows-latest
             target_name: windows-x86_64
-            app_bin: tda-app.exe
+            app_bin: sde-app.exe
             cli_bin: dump_channels.exe
           - os: ubuntu-latest
             target_name: linux-x86_64
-            app_bin: tda-app
+            app_bin: sde-app
             cli_bin: dump_channels
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +49,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          $staging = "tda-${{ matrix.target_name }}"
+          $staging = "sde-${{ matrix.target_name }}"
           New-Item -ItemType Directory -Path $staging | Out-Null
           Copy-Item "target/release/${{ matrix.app_bin }}" $staging/
           Copy-Item "target/release/${{ matrix.cli_bin }}" $staging/
@@ -60,7 +60,7 @@ jobs:
       - name: Package binaries (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          staging="tda-${{ matrix.target_name }}"
+          staging="sde-${{ matrix.target_name }}"
           mkdir "$staging"
           cp "target/release/${{ matrix.app_bin }}" "$staging/"
           cp "target/release/${{ matrix.cli_bin }}" "$staging/"
@@ -71,10 +71,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tda-${{ matrix.target_name }}
+          name: sde-${{ matrix.target_name }}
           path: |
-            tda-${{ matrix.target_name }}.zip
-            tda-${{ matrix.target_name }}.tar.gz
+            sde-${{ matrix.target_name }}.zip
+            sde-${{ matrix.target_name }}.tar.gz
           if-no-files-found: ignore
 
   release:

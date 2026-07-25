@@ -132,7 +132,10 @@ pub fn build_plot(
     }
 
     let time_span = (max_time - min_time).max(f64::EPSILON);
-    let raw_min = samples.iter().map(|&(_, v)| v).fold(f64::INFINITY, f64::min);
+    let raw_min = samples
+        .iter()
+        .map(|&(_, v)| v)
+        .fold(f64::INFINITY, f64::min);
     let raw_max = samples
         .iter()
         .map(|&(_, v)| v)
@@ -240,7 +243,12 @@ pub fn dominant_scroll_axis(delta_x: f64, delta_y: f64) -> ScrollAxis {
 /// is always a valid, clamped-to-`[0, 1]` window at least
 /// [`MIN_ZOOM_WIDTH`] wide.
 #[must_use]
-pub fn zoom_scroll(current: (f64, f64), delta_x: f64, delta_y: f64, cursor_fraction: f64) -> (f64, f64) {
+pub fn zoom_scroll(
+    current: (f64, f64),
+    delta_x: f64,
+    delta_y: f64,
+    cursor_fraction: f64,
+) -> (f64, f64) {
     let (mut start, mut end) = current;
     let cursor_fraction = cursor_fraction.clamp(0.0, 1.0);
 
@@ -355,10 +363,12 @@ pub fn build_lap_comparison_plot(
     }
 
     let time_span = time_span.max(f64::EPSILON);
-    let (raw_min, raw_max) = per_range_samples.iter().flatten().fold(
-        (f64::INFINITY, f64::NEG_INFINITY),
-        |(lo, hi), &(_, v)| (lo.min(v), hi.max(v)),
-    );
+    let (raw_min, raw_max) = per_range_samples
+        .iter()
+        .flatten()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(_, v)| {
+            (lo.min(v), hi.max(v))
+        });
     let (min_val, val_span) = value_scale(raw_min, raw_max);
 
     let series = per_range_samples
@@ -611,8 +621,8 @@ mod tests {
     #[test]
     fn windowed_samples_synthesizes_boundary_points() {
         let c = channel(true); // timecodes 0/10/20/30, values 1/2/4/8
-        // (5, 25) doesn't land on any real sample, so both edges should
-        // be filled in via interpolation.
+                               // (5, 25) doesn't land on any real sample, so both edges should
+                               // be filled in via interpolation.
         let samples = windowed_samples(&c, 5.0, 25.0);
         assert_eq!(samples.first(), Some(&(5.0, 1.5))); // halfway between 1.0@0 and 2.0@10
         assert_eq!(samples.last(), Some(&(25.0, 6.0))); // halfway between 4.0@20 and 8.0@30
@@ -633,7 +643,12 @@ mod tests {
         let plot = build_plot(&c, 100.0, 100.0, Some((5.0, 25.0))).unwrap();
         assert!(plot.commands.starts_with("M 0 "));
         let last_command = plot.commands.trim_end().rsplit("L ").next().unwrap();
-        let x: f64 = last_command.split_whitespace().next().unwrap().parse().unwrap();
+        let x: f64 = last_command
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
         assert!((x - 100.0).abs() < 1e-9);
     }
 
@@ -661,7 +676,11 @@ mod tests {
 
     #[test]
     fn filter_channel_names_is_case_insensitive_substring() {
-        let names = vec!["Ground Speed".to_string(), "RPM".to_string(), "Gear".to_string()];
+        let names = vec![
+            "Ground Speed".to_string(),
+            "RPM".to_string(),
+            "Gear".to_string(),
+        ];
         assert_eq!(filter_channel_names(&names, ""), names);
         assert_eq!(filter_channel_names(&names, "gr"), vec!["Ground Speed"]);
         assert_eq!(filter_channel_names(&names, "ea"), vec!["Gear"]);

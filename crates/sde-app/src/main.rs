@@ -16,11 +16,7 @@
 // - too_many_lines fires on `main`, which is just flat callback
 //   registration (one closure per Slint callback) — splitting it up
 //   would add indirection without making any single piece simpler.
-#![allow(
-    clippy::doc_markdown,
-    clippy::suboptimal_flops,
-    clippy::too_many_lines
-)]
+#![allow(clippy::doc_markdown, clippy::suboptimal_flops, clippy::too_many_lines)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -384,8 +380,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 };
 
                 let current = state_mut.zoom.unwrap_or((0.0, 1.0));
-                let updated =
-                    graph::zoom_scroll(current, delta_x, delta_y, f64::from(fraction));
+                let updated = graph::zoom_scroll(current, delta_x, delta_y, f64::from(fraction));
                 state_mut.zoom = (!graph::is_full_zoom(updated)).then_some(updated);
             }
             replot(&window, &state);
@@ -433,7 +428,9 @@ fn main() -> Result<(), slint::PlatformError> {
 
             if session.channels.contains_key(&name) && !is_existing_math {
                 drop(state_mut);
-                window.set_math_channel_error(format!("A channel named \"{name}\" already exists.").into());
+                window.set_math_channel_error(
+                    format!("A channel named \"{name}\" already exists.").into(),
+                );
                 return;
             }
 
@@ -564,7 +561,11 @@ fn cursor_text_for_group(
                     .collect::<Vec<_>>()
                     .join(" | ")
             });
-            let values = if values.is_empty() { "n/a".to_string() } else { values };
+            let values = if values.is_empty() {
+                "n/a".to_string()
+            } else {
+                values
+            };
             if group.len() == 1 {
                 values
             } else {
@@ -730,10 +731,9 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
             window.set_compare_lap_labels(to_model(vec![]));
             window.set_compare_lap_active(to_bool_model(vec![]));
             window.set_compare_status_text(String::new().into());
-            window.set_legend(slint::ModelRc::new(slint::VecModel::from(Vec::<
-                LegendEntry,
-            >::new(
-            ))));
+            window.set_legend(slint::ModelRc::new(slint::VecModel::from(
+                Vec::<LegendEntry>::new(),
+            )));
             window.set_math_channel_names(to_model(vec![]));
             window.set_math_channel_error(String::new().into());
             window.set_math_name_text(String::new().into());
@@ -763,7 +763,8 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
     }
 
     window.set_window_title(format!("sde-app — {file_name}").into());
-    window.set_status_text("No channels added to the worksheet yet — click one on the left.".into());
+    window
+        .set_status_text("No channels added to the worksheet yet — click one on the left.".into());
     window.set_lap_labels(to_model(lap_labels));
     window.set_current_lap_index(0);
     window.set_compare_lap_labels(to_model(compare_lap_labels));
@@ -815,8 +816,8 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     // scroll event (see `on_zoom_scrolled`) can reuse the existing cache
     // instead of re-cloning every plotted channel's full sample arrays,
     // which matters since those scroll unboundedly fast on a trackpad.
-    let rebuild_plotted =
-        state.plotted_key.as_ref() != Some(&(state.session_generation, state.dock_channels.clone()));
+    let rebuild_plotted = state.plotted_key.as_ref()
+        != Some(&(state.session_generation, state.dock_channels.clone()));
     let mut plotted = rebuild_plotted.then(HashMap::new);
 
     let mut docks = Vec::with_capacity(state.dock_channels.len());
@@ -852,15 +853,23 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
                 );
             }
 
-            if let Some(plot) =
-                graph::build_lap_comparison_plot(channel, VIEW_WIDTH, VIEW_HEIGHT, &ranges, time_span)
-            {
+            if let Some(plot) = graph::build_lap_comparison_plot(
+                channel,
+                VIEW_WIDTH,
+                VIEW_HEIGHT,
+                &ranges,
+                time_span,
+            ) {
                 any_data = true;
                 // Only label traces when the dock overlays more than one
                 // channel — with a single channel the dock header already
                 // names it, and lap comparison already has its own
                 // top-level legend (see `DockPanel`'s per-series legend).
-                let label = if group.len() > 1 { channel.name.clone() } else { String::new() };
+                let label = if group.len() > 1 {
+                    channel.name.clone()
+                } else {
+                    String::new()
+                };
                 for s in plot.series {
                     series.push(SeriesData {
                         commands: s.commands.into(),

@@ -2,9 +2,9 @@
 /target
 **/target
 
-# Cargo.lock is committed: this workspace produces binaries (tda-cli, eventually
-# tda-app), so per Cargo convention we lock the resolved dependency graph.
-# If tda-formats/tda-core are split into standalone published library crates
+# Cargo.lock is committed: this workspace produces binaries (sde-cli, sde-app),
+# so per Cargo convention we lock the resolved dependency graph.
+# If sde-formats/sde-core are split into standalone published library crates
 # later, revisit whether their own Cargo.lock should be excluded.
 
 # Editor / IDE

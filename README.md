@@ -16,11 +16,13 @@ See [`PROJECT_PLAN.md`](./PROJECT_PLAN.md) for full architecture, crate layout,
 milestone sequence, and format-validation notes. That file is the source of truth for
 scope and design decisions — this README is just the quick-start.
 
+![sde-app: multi-lap comparison with stacked channel docks](./content/screenshot.png)
+
 ## Status
 
-Milestone 1–3 done: MoTeC `.ld` parsing, the core session data model, and a first
-Slint graph/cursor UI slice. See `PROJECT_PLAN.md`'s milestone checklist for current
-progress.
+Milestone 1–5 done: MoTeC `.ld` parsing, the core session data model, and a Slint GUI
+with worksheets/docks, channel search, lap selection/comparison, math channels, and
+timeline zoom/pan. See `PROJECT_PLAN.md`'s milestone checklist for current progress.
 
 ## Workspace layout
 
@@ -53,6 +55,11 @@ cargo run -p sde-cli --bin dump_channels -- path/to/log.ld
 
 Prints driver/vehicle/venue metadata, lap count, and each channel's name, unit,
 sample count, and first few values.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for build/test/lint requirements and workspace
+conventions. This project follows a [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 ## Reference repos
 
