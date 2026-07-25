@@ -23,7 +23,7 @@ jobs:
         os: [windows-latest, ubuntu-latest]
         toolchain: [stable, nightly]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux GUI deps (Slint / rfd)
         if: matrix.os == 'ubuntu-latest'
