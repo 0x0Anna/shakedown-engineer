@@ -61,9 +61,10 @@ pub struct CarInfo {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResultInfo {
     /// Final *scored* stage time, i.e. including any recovery penalties.
-    /// Matches the last value of the telemetry's `raceTime` channel — see
-    /// `sde_motec::apply_ngp_timebase`, which strips those penalties back
-    /// out to recover physical driving time.
+    /// Matches the last value of the telemetry's `raceTime` channel exactly.
+    /// Note this is neither the telemetry's duration (recording continues
+    /// for a fixed ~20 s run-out past the finish line) nor a figure
+    /// comparable across runs — see [`ReplayInfo::driving_time_secs`].
     pub finish_time_secs: Option<f64>,
     pub avg_speed_kph: Option<f64>,
     /// e.g. `"Hotlap"`.
@@ -188,13 +189,13 @@ impl ReplayInfo {
             .sum()
     }
 
-    /// Physical driving time: the scored finish time with recovery
-    /// penalties removed. `None` if the file has no finish time.
+    /// Actual driving time: the scored finish time with recovery penalties
+    /// removed. `None` if the file has no finish time.
     ///
-    /// This is the figure that should match the span of the corrected
-    /// telemetry timebase (`sde_motec::apply_ngp_timebase`), and the one to
-    /// compare between runs — scored times aren't comparable when one run
-    /// took a penalty and the other didn't.
+    /// This is the figure to compare between runs — scored times aren't
+    /// comparable when one run took a penalty and the other didn't. It is
+    /// *not* the telemetry's duration, which additionally includes the
+    /// pre-start countdown and the fixed ~20 s post-finish run-out.
     #[must_use]
     pub fn driving_time_secs(&self) -> Option<f64> {
         Some(self.result.finish_time_secs? - self.total_penalty_secs())

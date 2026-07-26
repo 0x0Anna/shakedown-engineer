@@ -81,9 +81,9 @@ pub struct Session {
     pub metadata: HashMap<String, String>,
     pub key_channel_map: KeyChannelMap,
     pub file_name: String,
-    /// Stage-time penalties (RSF/NGP "recover vehicle" events), already
-    /// removed from the channel timecodes — see [`TimePenalty`]. Empty for
-    /// formats that have no such concept.
+    /// Stage-time penalties (RSF/NGP "recover vehicle" events). They affect
+    /// only the *scored* stage time, not the channel timecodes — see
+    /// [`TimePenalty`]. Empty for formats that have no such concept.
     pub time_penalties: Vec<TimePenalty>,
 }
 

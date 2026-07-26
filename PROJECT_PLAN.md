@@ -659,67 +659,137 @@ captures aren't needed to run them):
   is also overridden to 3, since the exporter's 0 would render 2.16 % wear as a
   flat `2 %` and discard the signal the fix just recovered.
 
-- **The declared `sample_rate` is wrong, and no fixed rate could be right.**
-  The header says 144 Hz in both files. The measured sample rates are 152.6 Hz
-  and 154.3 Hz — but that difference is *not* a logging-rate setting: RSF writes
-  one row per rendered **frame**, so the sample rate tracks rendering
-  performance and is not a stable property of the log. Underneath it, the stage
-  clock ticks at a consistent ~125 Hz: the modal step is 7.996 ms in both runs,
-  with the same secondary modes (9.003, 8.301 ms) in the same order. ~20 % of
-  rows are therefore duplicates, where a frame was rendered without the physics
-  having advanced. The declared 144 Hz matches neither figure.
+- **The declared `sample_rate` is *right*; the original diagnosis here was
+  wrong.** Recorded in full because the mistake is instructive and nearly
+  shipped.
 
-  So the synthetic `index / sample_rate` axis stretched each session by a
-  different, frame-rate-dependent amount — silently invalidating exactly the
-  run-to-run comparison this project exists to do. `raceTime` is authoritative:
-  its final value matches the replay `.ini`'s `FinishTimeSecs` to the
-  millisecond (417.569 / 282.277). `apply_ngp_timebase` now rebuilds the axis
-  from it, with three corrections:
+  Dividing each file's row count by its `raceTime` span gives 152.6 Hz and
+  154.3 Hz against a declared 144 Hz, differing from *each other* by 1.1 %.
+  That looked conclusive: no fixed rate fits both, so the synthetic
+  `index / sample_rate` axis must be stretching each session differently.
+  `apply_ngp_timebase` was written to rebuild the axis from `raceTime`
+  instead, subtracting penalties, back-extrapolating the countdown and
+  nudging apart the ~20 % duplicate values.
 
-  1. **Penalties removed.** `raceTime` is the *scored* clock. Run1 contains two
-     discontinuities of exactly 35.008 s (a 35 s penalty plus one ordinary 8 ms
-     step) at stage distances 4334.9 m and 5802.7 m, speed 0 -> 0 — Anna's two
-     vehicle recoveries. Left in, those holes would wreck every derived rate
-     (damper velocity, acceleration). They're subtracted from the axis and
-     surfaced as `LdFile::time_penalties` / `Session::time_penalties` instead,
-     since where a driver had to recover is itself worth showing. Independently
-     corroborated by the replay `.ini`: Run1 has `[RunkiSpots] Count = 2` with
-     `R1Pos = 4342.6` / `R2Pos = 5810.4` and `Tim = 35.0` each, and Run2 has no
-     such section at all. **`[RunkiSpots]` is the recovery-event record.**
-  2. **Origin at the stage start.** `raceTime` is pinned at 0 through the
-     pre-start window, which would collapse those samples onto one instant.
-     They're back-extrapolated at the nominal tick and carry negative
-     timecodes, so t=0 means "stage start" and two runs align with no offset.
-     **`timecodes[0]` is no longer guaranteed `>= 0`** — the doc comments on
-     `LdChannel::timecodes` and `Channel::timecodes` now say so explicitly.
+  The NGP `.tsv` disproves it. NGP's recorder writes a `utcSystemTime`
+  wall-clock column that `ngp2MoTeC` drops, and against it **both captures
+  sample at 144.095 Hz** — the declared rate is right to within 0.07 %
+  (0.24 s of drift over a 368 s recording). The `.tsv` also carries
+  `totalSteps`, whose delta is exactly `telemetryTics` (5) for every one of
+  the 54038 row transitions: the row stream is perfectly uniform.
 
-     On what that pre-start window contains (per Anna, 2026-07-26): when a
-     stage loads, the car sits idle at the line until the driver holds the
-     handbrake or ignition, which *triggers* the countdown. During the
-     countdown the engine is live and the driver selects a gear and revs to set
-     up the launch. Recording evidently begins at the countdown trigger, not at
-     stage load — the driver-controlled idle before it is absent, and the
-     window is exactly 1009 samples in both runs. The launch prep inside it is
-     clearly variable (first throttle >0.5 at sample 680 vs 772), so 1009 is
-     not a fixed *duration* of driver activity. Mechanism not established; the
-     countdown may be a fixed frame count, or the recorder may start at a fixed
-     offset. Treat 1009 as an observation, not a constant. Nothing depends on
-     it — the origin is derived from `raceTime` itself.
+  The phantom rates came from `raceTime` not spanning the recording. It is
+  the *stage* clock, so it reads a flat 0 through the countdown, jumps on a
+  penalty without wall-clock time passing, and — the part that mattered —
+  **freezes at the finish while recording continues** for a fixed ~20 s
+  run-out (2881 and 2882 rows; the car is still braking from 116 and
+  140 km/h, `distanceToEnd` running to -277 m). Dividing by a span that
+  excludes ~20 s of a ~350 s run inflates the rate by exactly the ~6 %
+  observed, and the residual difference between the two runs is just Run1's
+  longer stage.
 
-     Note also that **driver reaction time is inside the stage time**: the
-     clock starts at countdown expiry regardless of movement, and the car first
-     moves 39 (Run1) / 33 (Run2) samples later, ~0.25 s and ~0.21 s. So t=0 is
-     the official timing start, not first motion — which is the correct origin
-     for comparison, since reaction time is part of the driver's result.
-  3. **Strictly increasing.** ~20 % of samples repeat the previous `raceTime`
-     (a frame rendered without the physics advancing — see above). Duplicates
-     are nudged apart by 1e-6 ms rather than dropped, so channels keep a 1:1
-     correspondence with raw file sample indices — which matters for
-     cross-referencing the `.rpl` frame stream (see below), itself a
-     per-frame record.
+  Worse, deriving timecodes from `raceTime` **compressed that entire run-out
+  into 0.003 ms** — real telemetry destroyed. `post_finish_run_out_is_not_
+  compressed` in `rsf_ngp_tests` guards against a regression.
 
-  Gated on a usable `raceTime` channel, so non-RSF files keep the synthetic axis
-  untouched; verified no change to the ACC capture (still 5 laps, 37 channels).
+  What `apply_ngp_timebase` does now is much smaller. The uniform axis is
+  kept; only two things are taken from `raceTime`:
+
+  1. **The origin.** The axis is shifted so t=0 is the stage start, letting
+     two runs align with no per-run offset. Countdown rows take honest
+     negative timecodes (-7006.9 ms in both, matching the `.tsv`'s measured
+     7.002 s). **`timecodes[0]` is therefore not guaranteed `>= 0`** — the
+     doc comments on `LdChannel::timecodes` and `Channel::timecodes` say so.
+     Only the origin moves; spacing is untouched.
+  2. **Penalty events.** A recovery adds a fixed 35 s to the scored clock
+     with no wall-clock time passing, so it leaves the sample axis alone and
+     is reported as a `TimePenalty` event only. Run1 yields two, at
+     219.5 s and 314.1 s, +35.0 s each; Run2 none. Corroborated by the
+     replay `.ini`: Run1 has `[RunkiSpots] Count = 2` at 4342.6 m / 5810.4 m
+     with `Tim = 35.0` each, and Run2 has no such section. **`[RunkiSpots]`
+     is the recovery-event record.** Note scored times aren't comparable
+     between a penalised run and a clean one — subtract these to compare
+     driving.
+
+  Gated on a usable `raceTime` channel, so non-RSF files are untouched;
+  verified no change to the ACC capture (still 5 laps, 37 channels).
+
+  Lesson for the next format investigation: two independent signals
+  disagreeing (144 Hz declared vs 152.6/154.3 Hz measured) does not mean the
+  declared one is wrong. Here the measurement was wrong, because the
+  denominator silently excluded part of the recording. A wall-clock column
+  settled in one query what three rounds of inference got backwards.
+
+
+### NGP native `.tsv` telemetry (2026-07-26)
+
+The previous section's open item ("no sample file captured yet") is closed —
+and it turns out the `.tsv` is not redundant with the `.ld`. NGP's recorder
+writes `Plugins\NGP\telemetry\<name>.tsv`, and `ngp2MoTeC` (shipped in the RBR
+install at `NGP2MoTeC\ngp2MoTeC.exe`) converts it to the `.ld` we parse. Both
+runs' `.tsv` are now in `.sample-data/` alongside their `.ld` (gitignored;
+85 MB and 70 MB).
+
+Format is as predicted: tab-separated, one header row of dotted field names,
+one row per `telemetryTics` physics ticks (`telemetryTics=5` in
+`RichardBurnsRally.ini`). 190 columns vs the `.ld`'s 185. The conversion is
+lossy in three ways:
+
+- **Four columns are dropped entirely**: `totalSteps` (physics tick counter),
+  `stage`, `car`, and `utcSystemTime` (wall-clock timestamp,
+  `YYYY-MM-DD HH:MM:SS.ffffff`). Two of these settled the timebase question
+  above that three rounds of inference from the `.ld` alone got wrong.
+- **Channel names are truncated to 32 characters** by the `.ld` channel record
+  (`radiatorCoolantHeatState.temperature` -> `radiatorCoolantHeatState.tempera`).
+  Five columns are affected.
+- Everything else round-trips, including the 10^6 fixed-point encoding —
+  `LF.brakeDiskTemp` reads `672235712` in the native `.tsv` too, so that
+  scaling is **NGP's own, not an artifact of `ngp2MoTeC`**.
+
+`utcSystemTime` is worth keeping in mind for `sde-video`: it's an absolute
+wall-clock reference, which is exactly what's needed to sync telemetry against
+externally-recorded video (OBS capture, phone footage) rather than relying on
+manual alignment. Not pursued yet.
+
+Not proposing a `.tsv` parser right now — the `.ld` path works and is far
+cheaper to read than 85 MB of text — but the extra columns are a real argument
+for one later, and for preferring the `.tsv` as the archival source.
+
+### Install-path discovery and configuration (design note, 2026-07-26)
+
+Per Anna: in a normal user environment the app must be pointed at the RBR
+install root (e.g. `C:\Richard Burns Rally\`), with every other location
+*inferred* from it and individually *overridable*. Verified against the live
+install on this machine, the standard layout is:
+
+| What | Path (relative to install root) |
+| --- | --- |
+| NGP telemetry (`.ld` + `.tsv`) | `Plugins\NGP\telemetry\` |
+| Telemetry field selection | `Plugins\NGP\Telemetry.ini` (+ `.sample.ini`) |
+| Sample-decimation / recording toggle | `RichardBurnsRally.ini` `[NGP]` |
+| Replays (`.rpl` + `.ini` sidecar) | `Replays\` |
+| Car setups (`.lsp`) | `SavedGames\<CarPhysicsFolder>\` |
+| Pacenote plugin + its notes | `Plugins\Pacenote\` |
+| RSF car/physics data | `rsfdata\cars\` |
+| Stage/track data | `Maps\` |
+| RSF launcher config | `RallySimFans.ini`, `rallysimfans_personal.ini` |
+
+Note the `.sample-data/` folder layout (per-run `motec/`, `setup/`, `replay/`
+subfolders) is a hand-made capture convention, **not** RSF's — real discovery
+must use the table above, not that shape.
+
+The `.ini` files double as existence checks for validating a candidate install
+root (e.g. `RichardBurnsRally.ini` + `Plugins\NGP\Telemetry.ini` both present),
+and several of them carry the settings the app needs to *read* anyway:
+`telemetryRecording`, `telemetryTics`, and the `[NGP]` field selection that
+determines which columns a recording will contain. Worth surfacing in the UI —
+"telemetry recording is currently off" is a much better first-run experience
+than an empty file list.
+
+Config model, when built: a single required install root, a resolved-path
+struct with per-path overrides, and validation that reports which expected
+paths are missing rather than failing wholesale. Probably `sde-rbr` (path
+discovery is sim-specific, and UI-free), consumed by `sde-app`.
 
 Also worth recording from the same investigation, none of it implemented yet:
 
@@ -831,10 +901,17 @@ Also worth recording from the same investigation, none of it implemented yet:
       same run.
 - [ ] Capture an RSF run on a *gravel/snow* stage and a different car, to check
       whether the 10^6 fixed-point field list holds beyond this one tarmac/Mini
-      combination, and whether the 1009-sample pre-start window is a constant or
-      a coincidence of these two runs (see the timebase notes above — nothing
-      depends on it either way, but the mechanism is unexplained). Anna is
-      capturing these separately.
+      combination. Anna is capturing these separately. (The 1009-row pre-start
+      window is no longer open: `totalSteps` = 5050 at the stage start in both
+      runs, so the countdown is a fixed physics-tick count.)
+- [ ] Build install-root configuration + path discovery (see the design note
+      above). Prerequisite for anything that loads data outside `.sample-data/`,
+      and it supersedes the "how does replay metadata reach the app" question
+      below — pairing a `.ld` with its `.rpl`/`.ini` should go through resolved
+      paths, not a folder convention.
+- [ ] Consider reading the NGP `.tsv` directly rather than the converted `.ld`,
+      to recover `utcSystemTime` (absolute wall clock — the natural anchor for
+      `sde-video` sync), `totalSteps`, and untruncated channel names.
 - [ ] Decide where the `.lsp` setup parser lives (`sde-formats::rbr`) and whether
       to read the setup from the standalone file or the copy embedded in the
       `.rpl` — the latter is self-describing and can't drift from the run.

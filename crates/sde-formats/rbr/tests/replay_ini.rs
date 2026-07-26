@@ -140,8 +140,7 @@ fn parses_recovery_spots() {
 #[test]
 fn driving_time_strips_recovery_penalties() {
     // The whole point of modelling penalties: Run1's *scored* 417.6 s and
-    // Run2's 282.3 s aren't comparable, but the driving times are — and
-    // 347.57 s is what the corrected telemetry timebase spans.
+    // Run2's 282.3 s aren't comparable, but the driving times are.
     let run1 = parse_replay_ini_str(RUN1);
     assert!((run1.result.finish_time_secs.unwrap() - 417.568_512).abs() < 1e-9);
     assert!((run1.driving_time_secs().unwrap() - 347.568_512).abs() < 1e-9);

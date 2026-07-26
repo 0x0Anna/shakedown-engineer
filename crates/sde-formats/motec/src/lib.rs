@@ -68,14 +68,14 @@ pub struct LdChannel {
     /// See `decode_channels`' file-level fallback for the correction applied
     /// in that case.
     pub interpolate: bool,
-    /// Sample timecodes in milliseconds, strictly increasing.
+    /// Sample timecodes in milliseconds, strictly increasing:
+    /// `i * (1000 / sample_rate)` for sample index `i`.
     ///
-    /// Normally `i * (1000 / sample_rate)` for sample index `i`, i.e. ms
-    /// since the start of the log. RSF/NGP files are the exception: their
-    /// declared `sample_rate` is wrong, so the axis is rebuilt from the
-    /// `raceTime` stage clock by [`apply_ngp_timebase`]. There t=0 is the
-    /// *stage start*, and the pre-start idle samples carry negative
-    /// timecodes — so don't assume `timecodes[0] >= 0`.
+    /// Measured from the start of the log, except for RSF/NGP files, which
+    /// [`apply_ngp_timebase`] shifts so t=0 is the *stage start*. The
+    /// pre-start countdown samples then carry negative timecodes — so don't
+    /// assume `timecodes[0] >= 0`. Only the origin moves; the spacing is
+    /// always uniform.
     pub timecodes: Vec<f64>,
     /// Physical (converted) sample values, one per timecode.
     pub values: Vec<f64>,
@@ -139,17 +139,23 @@ pub struct LdMetadata {
 /// a fixed penalty (35 s as of NGP 7.5) is added to the stage time without
 /// any corresponding wall-clock time passing.
 ///
-/// Penalties are *removed* from [`LdChannel::timecodes`] so the time axis
-/// stays physically continuous (a 35 s hole would otherwise wreck every
-/// derived rate — damper velocity, acceleration, and so on). They're
-/// surfaced here instead, since where and how often a driver had to
-/// recover is itself worth showing.
+/// A penalty affects only the *scored* stage time, never
+/// [`LdChannel::timecodes`]: no wall-clock time passes, and the sample
+/// stream keeps its steady cadence straight through. So this is purely an
+/// event record — but a useful one, since where and how often a driver had
+/// to recover is worth showing, and it cross-checks against the
+/// `[RunkiSpots]` section of the replay `.ini` sidecar.
+///
+/// It also means scored finish times aren't comparable between a run that
+/// took a penalty and one that didn't; subtract these to compare driving.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimePenalty {
-    /// Corrected (penalty-free) timecode at which the penalty was applied,
-    /// on the same axis as [`LdChannel::timecodes`].
+    /// When the penalty was applied, on the same axis as
+    /// [`LdChannel::timecodes`] (t=0 = stage start).
     pub timecode_ms: f64,
-    /// Penalty added to the scored stage time, in milliseconds.
+    /// Penalty added to the scored stage time, in milliseconds. Carries
+    /// ~1 ms of noise from the stage clock's own quantization, so an
+    /// exactly-35 s penalty reads as ~35001 ms.
     pub penalty_ms: f64,
 }
 
@@ -160,9 +166,9 @@ pub struct LdFile {
     /// Channels in the order they appear in the file's linked list.
     pub channels: Vec<LdChannel>,
     pub file_name: String,
-    /// Stage-time penalties detected and removed from the channel
-    /// timecodes, in chronological order. Empty for files without an
-    /// RSF/NGP stage clock, and for clean runs that took no penalty.
+    /// Stage-time penalties, in chronological order. These do not affect
+    /// the channel timecodes — see [`TimePenalty`]. Empty for files without
+    /// an RSF/NGP stage clock, and for clean runs that took no penalty.
     pub time_penalties: Vec<TimePenalty>,
 }
 
@@ -350,10 +356,14 @@ fn is_discrete_channel_name(name: &str) -> bool {
         .any(|tok| DISCRETE_TOKENS.contains(&tok.to_ascii_uppercase().as_str()))
 }
 
-/// NGP telemetry fields that RSF's MoTeC exporter writes as int32
-/// fixed-point scaled by 10^6 while leaving `dec_pts` at 0, so the
-/// declared conversion yields values a million times too large (brake
-/// disc temperatures of 6.7e8 K rather than 672 K).
+/// NGP telemetry fields recorded as int32 fixed-point scaled by 10^6 with
+/// `dec_pts` left at 0, so the declared conversion yields values a million
+/// times too large (brake disc temperatures of 6.7e8 K rather than 672 K).
+///
+/// The scaling originates in NGP's own telemetry recorder, not in the
+/// `.ld` conversion: the recorder's native `.tsv` output carries the same
+/// `672235712` for `LF.brakeDiskTemp`, and `ngp2MoTeC` passes it through
+/// unchanged.
 ///
 /// Keyed on the field name rather than the element type on purpose: these
 /// are exactly the members typed `float` in NGP's own
@@ -396,140 +406,95 @@ const NGP_RACE_TIME_CHANNEL: &str = "raceTime";
 /// 35 s. Anything in between doesn't occur in practice.
 const PENALTY_JUMP_THRESHOLD_MS: f64 = 1000.0;
 
-/// Nudge applied to duplicate timecodes to keep the axis strictly
-/// increasing. Nanosecond scale — far below the ~6.5 ms sample period, so
-/// it can't reorder samples or visibly shift them, but enough that binary
-/// search and interpolation over `timecodes` stay well-defined.
-const DUPLICATE_TIMECODE_NUDGE_MS: f64 = 1e-6;
+// (No duplicate-nudging constant: the uniform axis this function keeps is
+// strictly increasing by construction. `raceTime`'s repeated values are a
+// property of the stage clock, not of the sample spacing.)
 
-/// Rebuild the session's time axis from RSF/NGP's `raceTime` stage clock,
-/// replacing the synthetic `index / sample_rate` timecodes that
-/// [`decode_channel`] produces.
+/// Rebase an RSF/NGP session's time axis so t=0 is the stage start, and
+/// report any stage-time penalties.
 ///
-/// RSF's exporter writes one row per rendered *frame*, not per physics
-/// tick, so the sample rate tracks rendering performance and is not a
-/// property of the log at all: 152.6 Hz and 154.3 Hz across two runs
-/// recorded minutes apart on the same car and stage. The declared
-/// `sample_rate` (144 Hz observed) matches neither that nor the underlying
-/// stage clock, which ticks at a consistent ~125 Hz — the modal step is
-/// 7.996 ms in both runs, with the same secondary modes in the same order.
+/// **The uniform `index / sample_rate` axis is kept.** An earlier revision
+/// of this function rebuilt the axis from `raceTime` instead, on the
+/// evidence that dividing the row count by the `raceTime` span gave
+/// 152.6 Hz and 154.3 Hz against a declared 144 Hz. That reasoning was
+/// wrong, and the `.tsv` NGP writes alongside the `.ld` shows why: it
+/// carries a `utcSystemTime` wall-clock column (dropped in `.ld`
+/// conversion), and against it **both captures sample at 144.095 Hz**. The
+/// declared rate is right to within 0.07%.
 ///
-/// So the synthetic `index / sample_rate` axis stretches each session by a
-/// different, frame-rate-dependent amount, silently invalidating exactly
-/// the run-to-run comparison this project exists to do. `raceTime` is
-/// authoritative instead: its final value matches the `FinishTimeSecs` in
-/// the replay `.ini` sidecar exactly.
+/// The phantom rates came from `raceTime` not spanning the whole
+/// recording. It is the *stage* clock, so it:
 ///
-/// It needs three corrections to become a usable physical axis:
+/// - reads a flat 0 through the countdown before the start (1009 rows in
+///   both captures — a fixed physics-tick count: `totalSteps` reads 5050 at
+///   the start of each),
+/// - jumps on a penalty without wall-clock time passing, and
+/// - **freezes at the finish while recording continues** for a fixed ~20 s
+///   run-out (2881 and 2882 rows), during which the car is still braking
+///   from 116 and 140 km/h with `distanceToEnd` running to -277 m.
 ///
-/// 1. **Penalties removed.** `raceTime` is the *scored* clock, so a
-///    "recover vehicle" event adds 35 s with no wall-clock time passing.
-///    Left in, that hole would corrupt every derived rate. The jumps are
-///    subtracted out and reported as [`TimePenalty`] instead.
-/// 2. **Origin at the stage start.** `raceTime` is pinned at 0 through the
-///    pre-start idle (1009 samples in both observed runs), which would
-///    collapse them onto one instant. They're back-extrapolated at the
-///    nominal sample period, giving them negative timecodes, so t=0 means
-///    "stage start" and two runs are directly comparable with no offset.
-/// 3. **Strictly increasing.** Roughly 20% of samples repeat the previous
-///    `raceTime` (the exporter samples faster than the physics updates);
-///    duplicates are nudged apart rather than dropped, so channels keep a
-///    1:1 correspondence with the raw file's sample indices.
+/// Deriving timecodes from it therefore compressed that run-out to a
+/// single instant. Nothing needs correcting in the sample spacing: the
+/// samples really are evenly spaced in wall-clock time.
 ///
-/// Returns `None` — leaving the synthetic axis untouched — for any file
-/// without a usable `raceTime` channel, which includes every non-RSF
-/// MoTeC file.
+/// What `raceTime` is genuinely good for, and all this function uses it
+/// for:
+///
+/// 1. **Locating the stage start**, so the axis can be shifted to put t=0
+///    there. Two runs then align with no per-run offset, and the pre-start
+///    countdown rows take honest negative timecodes rather than being
+///    dropped. (Driver reaction time stays inside the stage time, where it
+///    belongs — the clock starts at countdown expiry, not at first motion.)
+/// 2. **Detecting penalties.** A "recover vehicle" event adds a fixed 35 s
+///    to the scored clock with no wall-clock time passing, so it leaves the
+///    sample axis untouched and is reported as a [`TimePenalty`] event
+///    only. Cross-checks against the replay `.ini`'s `[RunkiSpots]`.
+///
+/// A no-op returning no penalties for any file without a usable `raceTime`
+/// channel, which includes every non-RSF MoTeC file.
 fn apply_ngp_timebase(channels: &mut [LdChannel]) -> Vec<TimePenalty> {
     let Some(race_time) = channels.iter().find(|c| c.name == NGP_RACE_TIME_CHANNEL) else {
         return Vec::new();
     };
     let n = race_time.values.len();
-    if n < 2 {
+    if n < 2 || race_time.timecodes.len() != n {
         return Vec::new();
     }
 
-    // Stage clock in ms, as logged (penalties still included).
-    let scored: Vec<f64> = race_time.values.iter().map(|v| v * 1000.0).collect();
-
-    // Nominal stage-clock tick: the median of the ordinary forward steps.
-    // This is the *physics* period (~8 ms), not the frame period — the
-    // zero-length steps filtered out here are the surplus frames.
-    // Median rather than mean so the penalty jumps and the ~20% zero-length
-    // steps can't drag it, and so it survives however irregular the tail is.
-    let mut steps: Vec<f64> = scored
-        .windows(2)
-        .map(|w| w[1] - w[0])
-        .filter(|&dt| dt > 0.0 && dt <= PENALTY_JUMP_THRESHOLD_MS)
-        .collect();
-    if steps.is_empty() {
-        return Vec::new();
-    }
-    steps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let nominal_step = steps[steps.len() / 2];
-    if nominal_step <= 0.0 {
-        return Vec::new();
-    }
-
-    // Subtract each penalty jump, keeping the one ordinary sample step that
-    // elapsed alongside it (an observed jump is 35.008 s = 35 s penalty +
-    // one 8 ms step, and that 8 ms is real time).
-    let mut penalties = Vec::new();
-    let mut cumulative = 0.0_f64;
-    let mut corrected = Vec::with_capacity(n);
-    corrected.push(scored[0]);
-    for i in 1..n {
-        let dt = scored[i] - scored[i - 1];
-        if dt > PENALTY_JUMP_THRESHOLD_MS {
-            let penalty = dt - nominal_step;
-            cumulative += penalty;
-            penalties.push(TimePenalty {
-                // Rebased below, once the stage-start origin is known.
-                timecode_ms: scored[i] - cumulative,
-                penalty_ms: penalty,
-            });
-        }
-        corrected.push(scored[i] - cumulative);
-    }
-
-    // Origin at the stage start: the first sample where the clock leaves 0.
+    // Stage start: the first row where the clock leaves 0. Everything before
+    // it is the pre-start countdown.
     let start = race_time
         .values
         .iter()
         .position(|&v| v > 0.0)
         .unwrap_or(0)
         .min(n - 1);
-    let origin = corrected[start];
+    let origin = race_time.timecodes[start];
 
-    // `i as f64` / `start as f64`: sample counts run to the tens of
-    // thousands, nowhere near f64's 2^53 exact-integer range.
-    #[allow(clippy::cast_precision_loss)]
-    for (i, t) in corrected.iter_mut().enumerate() {
-        *t = if i < start {
-            // Pre-start idle: the clock reads a flat 0 here, so spread these
-            // samples backwards at the nominal period instead of stacking
-            // them all on the origin.
-            -((start - i) as f64) * nominal_step
-        } else {
-            *t - origin
-        };
-    }
-    for p in &mut penalties {
-        p.timecode_ms -= origin;
-    }
+    // Penalties are read off the scored clock but timestamped on the
+    // (unmodified, wall-clock-uniform) sample axis. The scored clock
+    // advanced by `jump` across a step in which `elapsed` of real time
+    // passed, so the penalty proper is the difference — recovering a round
+    // 35.001 s from an observed 35.008 s jump, the residual being
+    // `raceTime`'s own ~1 ms quantization.
+    let penalties: Vec<TimePenalty> = (1..n)
+        .filter_map(|i| {
+            let jump = (race_time.values[i] - race_time.values[i - 1]) * 1000.0;
+            let elapsed = race_time.timecodes[i] - race_time.timecodes[i - 1];
+            (jump > PENALTY_JUMP_THRESHOLD_MS).then(|| TimePenalty {
+                timecode_ms: race_time.timecodes[i] - origin,
+                penalty_ms: jump - elapsed,
+            })
+        })
+        .collect();
 
-    // Duplicates (the exporter outrunning the physics tick) become a
-    // strictly increasing axis.
-    for i in 1..n {
-        if corrected[i] <= corrected[i - 1] {
-            corrected[i] = corrected[i - 1] + DUPLICATE_TIMECODE_NUDGE_MS;
-        }
-    }
-
-    // Only channels logged on this same axis; a file mixing sample rates
-    // keeps the synthetic timecodes for the odd ones out rather than being
-    // handed an array of the wrong length.
+    // Shift only channels sharing this row count; a file mixing sample rates
+    // keeps the odd ones out on their own origin rather than being silently
+    // misaligned.
     for channel in channels.iter_mut().filter(|c| c.timecodes.len() == n) {
-        channel.timecodes.copy_from_slice(&corrected);
+        for t in &mut channel.timecodes {
+            *t -= origin;
+        }
     }
 
     penalties
@@ -771,56 +736,76 @@ mod rsf_ngp_tests {
     }
 
     #[test]
-    fn race_time_replaces_the_declared_sample_rate_and_strips_penalties() {
-        // Three pre-start idle samples, a duplicate (exporter outrunning
-        // the physics tick), and a 35 s recovery penalty — the whole shape
-        // of a real RSF stage log, in nine samples.
-        let race_time = [0.0, 0.0, 0.0, 0.008, 0.016, 0.016, 0.024, 35.032, 35.040];
+    fn stage_start_becomes_the_origin_and_spacing_stays_uniform() {
+        // Three countdown rows, a repeated stage-clock value, a 35 s
+        // recovery penalty, then a post-finish plateau where raceTime has
+        // frozen but recording continues — the shape of a real RSF stage
+        // log, in ten rows. 100 Hz gives an exact 10 ms row period.
+        let race_time = [
+            0.0, 0.0, 0.0, 0.010, 0.020, 0.020, 0.030, 35.040, 35.050, 35.050,
+        ];
         let ld = build_ld(
             &[
                 f32_chan("raceTime", &race_time),
-                f32_chan("speed", &[0.0; 9]),
+                f32_chan("speed", &[0.0; 10]),
             ],
-            // Deliberately wrong, exactly as RSF writes it: at 144 Hz these
-            // nine samples would span 55.6 ms, not the real 40 ms.
-            144,
+            100,
         );
         let file = parse_bytes(&ld, "rsf.ld").unwrap();
 
-        // t=0 is the stage start, so the idle samples run negative at the
-        // 8 ms nominal period, and the 35 s penalty is gone from the axis.
+        // Only the origin moves, to the stage start at row 3. Spacing stays
+        // uniform — including across the repeat and the trailing plateau,
+        // which represent real elapsed time.
         let tc = &file.channel("raceTime").unwrap().timecodes;
-        let expected = [-24.0, -16.0, -8.0, 0.0, 8.0, 8.0, 16.0, 24.0, 32.0];
+        let expected = [-30.0, -20.0, -10.0, 0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
         for (i, (&got, &want)) in tc.iter().zip(expected.iter()).enumerate() {
             assert!(
-                (got - want).abs() < 1e-3,
-                "timecode[{i}] = {got}, expected ~{want}"
+                (got - want).abs() < 1e-6,
+                "timecode[{i}] = {got}, expected {want}"
             );
         }
 
-        // The duplicate is nudged rather than dropped: same sample count as
-        // the raw file, but strictly increasing.
         assert_eq!(tc.len(), race_time.len());
         assert!(
             tc.windows(2).all(|w| w[1] > w[0]),
             "timecodes must strictly increase: {tc:?}"
         );
 
-        // Every channel on the same axis is retimed, not just raceTime.
+        // Every channel on the same axis is rebased, not just raceTime.
         assert_eq!(&file.channel("speed").unwrap().timecodes, tc);
 
-        // The penalty itself is preserved as an event. Tolerance is looser
-        // here than for the timecodes above because the stage clock is
-        // stored as f32 seconds: one ulp at 35 s is ~3.8 us, so a value
-        // derived from it lands within a few thousandths of a millisecond.
+        // The penalty is recorded as an event without perturbing the axis.
+        // Loose tolerance: the stage clock is f32 seconds, one ulp at 35 s
+        // is ~3.8 us.
         assert_eq!(file.time_penalties.len(), 1);
         let p = file.time_penalties[0];
         assert!(
-            (p.penalty_ms - 35_000.0).abs() < 1e-2,
+            (p.penalty_ms - 35_000.0).abs() < 1e-1,
             "got {}",
             p.penalty_ms
         );
-        assert!((p.timecode_ms - 24.0).abs() < 1e-2, "got {}", p.timecode_ms);
+        assert!((p.timecode_ms - 40.0).abs() < 1e-2, "got {}", p.timecode_ms);
+    }
+
+    #[test]
+    fn post_finish_run_out_is_not_compressed() {
+        // Regression test for a real defect: an earlier revision rebuilt the
+        // axis from raceTime, which freezes at the finish while recording
+        // continues for a fixed ~20 s. That collapsed the entire run-out —
+        // the car braking from ~120 km/h to a stop, genuine telemetry — into
+        // a few microseconds.
+        let mut race_time = vec![0.0, 0.5, 1.0];
+        race_time.resize(100, 1.0); // frozen post-finish run-out
+        let ld = build_ld(&[f32_chan("raceTime", &race_time)], 100);
+        let file = parse_bytes(&ld, "rsf.ld").unwrap();
+
+        // Origin is row 1; the remaining 98 rows span 980 ms of real time.
+        let tc = &file.channel("raceTime").unwrap().timecodes;
+        assert!(
+            (tc.last().unwrap() - 980.0).abs() < 1e-6,
+            "run-out collapsed: last timecode {}",
+            tc.last().unwrap()
+        );
     }
 
     #[test]
