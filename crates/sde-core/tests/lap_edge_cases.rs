@@ -31,6 +31,7 @@ fn ld_file(channels: Vec<LdChannel>) -> LdFile {
         metadata: LdMetadata::default(),
         channels,
         file_name: "in-memory.ld".to_string(),
+        time_penalties: Vec::new(),
     }
 }
 

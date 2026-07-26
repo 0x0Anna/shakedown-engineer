@@ -54,6 +54,16 @@ fn main() -> ExitCode {
             lap.end_time - lap.start_time
         );
     }
+    if !session.time_penalties.is_empty() {
+        println!("Time penalties: {}", session.time_penalties.len());
+        for p in &session.time_penalties {
+            println!(
+                "  at {:>10.1}ms  +{:.1}s",
+                p.timecode_ms,
+                p.penalty_ms / 1000.0
+            );
+        }
+    }
     println!("Channels: {}", session.channels.len());
     println!();
 

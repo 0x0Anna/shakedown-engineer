@@ -707,6 +707,7 @@ mod tests {
             metadata: std::collections::HashMap::new(),
             key_channel_map: sde_core::KeyChannelMap::default(),
             file_name: "test".into(),
+            time_penalties: Vec::new(),
         };
         let labels = lap_labels(&session);
         assert_eq!(labels, vec!["All", "Lap 1 (30.0s)", "Lap 2 (35.5s)"]);
@@ -731,6 +732,7 @@ mod tests {
             metadata: std::collections::HashMap::new(),
             key_channel_map: sde_core::KeyChannelMap::default(),
             file_name: "test".into(),
+            time_penalties: Vec::new(),
         };
         assert_eq!(session_time_range(&session), (0.0, 65_500.0));
     }
@@ -903,6 +905,7 @@ mod tests {
             metadata: std::collections::HashMap::new(),
             key_channel_map: sde_core::KeyChannelMap::default(),
             file_name: "test".into(),
+            time_penalties: Vec::new(),
         };
         assert_eq!(session_time_range(&session), (0.0, 0.0));
     }
@@ -914,6 +917,7 @@ mod tests {
             metadata: std::collections::HashMap::new(),
             key_channel_map: sde_core::KeyChannelMap::default(),
             file_name: "test".into(),
+            time_penalties: Vec::new(),
         }
     }
 

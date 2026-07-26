@@ -18,7 +18,7 @@ use std::path::Path;
 
 pub mod mathexpr;
 
-pub use sde_motec::LdError;
+pub use sde_motec::{LdError, TimePenalty};
 
 /// A single telemetry channel. Field names mirror TDA's `Channel`
 /// dataclass (`data/base.py`).
@@ -30,7 +30,11 @@ pub struct Channel {
     /// `false` means "hold the previous value until the next timecode"
     /// rather than interpolate between samples.
     pub interpolate: bool,
-    /// Sample timecodes in milliseconds since the start of the session.
+    /// Sample timecodes in milliseconds, strictly increasing. Usually
+    /// measured from the start of the session, but see
+    /// [`sde_motec::LdChannel::timecodes`]: RSF/NGP stage logs are rebased
+    /// so t=0 is the stage start, which makes the pre-start idle samples
+    /// negative. Don't assume `timecodes[0] >= 0`.
     pub timecodes: Vec<f64>,
     pub values: Vec<f64>,
 }
@@ -77,6 +81,10 @@ pub struct Session {
     pub metadata: HashMap<String, String>,
     pub key_channel_map: KeyChannelMap,
     pub file_name: String,
+    /// Stage-time penalties (RSF/NGP "recover vehicle" events), already
+    /// removed from the channel timecodes — see [`TimePenalty`]. Empty for
+    /// formats that have no such concept.
+    pub time_penalties: Vec<TimePenalty>,
 }
 
 impl Session {
@@ -141,6 +149,7 @@ impl Session {
             metadata,
             key_channel_map,
             file_name: ld_file.file_name,
+            time_penalties: ld_file.time_penalties,
         }
     }
 }
