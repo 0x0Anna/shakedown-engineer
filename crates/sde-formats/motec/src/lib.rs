@@ -406,13 +406,19 @@ const DUPLICATE_TIMECODE_NUDGE_MS: f64 = 1e-6;
 /// replacing the synthetic `index / sample_rate` timecodes that
 /// [`decode_channel`] produces.
 ///
-/// RSF's exporter writes a `sample_rate` (144 Hz observed) that does not
-/// match the rate it actually logged at — measured 152.6 Hz and 154.3 Hz
-/// across two runs recorded minutes apart on the same car and stage — so
-/// the synthetic axis stretches or compresses each session by a different
-/// amount, silently invalidating run-to-run comparison. `raceTime` is
-/// authoritative: its final value matches the `FinishTimeSecs` in the
-/// replay `.ini` sidecar exactly.
+/// RSF's exporter writes one row per rendered *frame*, not per physics
+/// tick, so the sample rate tracks rendering performance and is not a
+/// property of the log at all: 152.6 Hz and 154.3 Hz across two runs
+/// recorded minutes apart on the same car and stage. The declared
+/// `sample_rate` (144 Hz observed) matches neither that nor the underlying
+/// stage clock, which ticks at a consistent ~125 Hz — the modal step is
+/// 7.996 ms in both runs, with the same secondary modes in the same order.
+///
+/// So the synthetic `index / sample_rate` axis stretches each session by a
+/// different, frame-rate-dependent amount, silently invalidating exactly
+/// the run-to-run comparison this project exists to do. `raceTime` is
+/// authoritative instead: its final value matches the `FinishTimeSecs` in
+/// the replay `.ini` sidecar exactly.
 ///
 /// It needs three corrections to become a usable physical axis:
 ///
@@ -445,7 +451,9 @@ fn apply_ngp_timebase(channels: &mut [LdChannel]) -> Vec<TimePenalty> {
     // Stage clock in ms, as logged (penalties still included).
     let scored: Vec<f64> = race_time.values.iter().map(|v| v * 1000.0).collect();
 
-    // Nominal sample period: the median of the ordinary forward steps.
+    // Nominal stage-clock tick: the median of the ordinary forward steps.
+    // This is the *physics* period (~8 ms), not the frame period — the
+    // zero-length steps filtered out here are the surplus frames.
     // Median rather than mean so the penalty jumps and the ~20% zero-length
     // steps can't drag it, and so it survives however irregular the tail is.
     let mut steps: Vec<f64> = scored

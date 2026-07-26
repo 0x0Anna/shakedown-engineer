@@ -659,13 +659,22 @@ captures aren't needed to run them):
   is also overridden to 3, since the exporter's 0 would render 2.16 % wear as a
   flat `2 %` and discard the signal the fix just recovered.
 
-- **The declared `sample_rate` is wrong, and differs per run.** The header says
-  144 Hz in both files; the real rates are 152.6 Hz and 154.3 Hz. So the
-  synthetic `index / sample_rate` axis stretched each session by a *different*
-  amount — silently invalidating exactly the run-to-run comparison this project
-  exists to do. `raceTime` is authoritative: its final value matches the replay
-  `.ini`'s `FinishTimeSecs` to the millisecond (417.569 / 282.277).
-  `apply_ngp_timebase` now rebuilds the axis from it, with three corrections:
+- **The declared `sample_rate` is wrong, and no fixed rate could be right.**
+  The header says 144 Hz in both files. The measured sample rates are 152.6 Hz
+  and 154.3 Hz — but that difference is *not* a logging-rate setting: RSF writes
+  one row per rendered **frame**, so the sample rate tracks rendering
+  performance and is not a stable property of the log. Underneath it, the stage
+  clock ticks at a consistent ~125 Hz: the modal step is 7.996 ms in both runs,
+  with the same secondary modes (9.003, 8.301 ms) in the same order. ~20 % of
+  rows are therefore duplicates, where a frame was rendered without the physics
+  having advanced. The declared 144 Hz matches neither figure.
+
+  So the synthetic `index / sample_rate` axis stretched each session by a
+  different, frame-rate-dependent amount — silently invalidating exactly the
+  run-to-run comparison this project exists to do. `raceTime` is authoritative:
+  its final value matches the replay `.ini`'s `FinishTimeSecs` to the
+  millisecond (417.569 / 282.277). `apply_ngp_timebase` now rebuilds the axis
+  from it, with three corrections:
 
   1. **Penalties removed.** `raceTime` is the *scored* clock. Run1 contains two
      discontinuities of exactly 35.008 s (a 35 s penalty plus one ordinary 8 ms
@@ -678,17 +687,36 @@ captures aren't needed to run them):
      `R1Pos = 4342.6` / `R2Pos = 5810.4` and `Tim = 35.0` each, and Run2 has no
      such section at all. **`[RunkiSpots]` is the recovery-event record.**
   2. **Origin at the stage start.** `raceTime` is pinned at 0 through the
-     pre-start idle (1009 samples in *both* runs — RSF's countdown is
-     fixed-length), which would collapse them onto one instant. They're
-     back-extrapolated at the nominal period and carry negative timecodes, so
-     t=0 means "stage start" and two runs align with no offset. **`timecodes[0]`
-     is no longer guaranteed `>= 0`** — the doc comments on
+     pre-start window, which would collapse those samples onto one instant.
+     They're back-extrapolated at the nominal tick and carry negative
+     timecodes, so t=0 means "stage start" and two runs align with no offset.
+     **`timecodes[0]` is no longer guaranteed `>= 0`** — the doc comments on
      `LdChannel::timecodes` and `Channel::timecodes` now say so explicitly.
+
+     On what that pre-start window contains (per Anna, 2026-07-26): when a
+     stage loads, the car sits idle at the line until the driver holds the
+     handbrake or ignition, which *triggers* the countdown. During the
+     countdown the engine is live and the driver selects a gear and revs to set
+     up the launch. Recording evidently begins at the countdown trigger, not at
+     stage load — the driver-controlled idle before it is absent, and the
+     window is exactly 1009 samples in both runs. The launch prep inside it is
+     clearly variable (first throttle >0.5 at sample 680 vs 772), so 1009 is
+     not a fixed *duration* of driver activity. Mechanism not established; the
+     countdown may be a fixed frame count, or the recorder may start at a fixed
+     offset. Treat 1009 as an observation, not a constant. Nothing depends on
+     it — the origin is derived from `raceTime` itself.
+
+     Note also that **driver reaction time is inside the stage time**: the
+     clock starts at countdown expiry regardless of movement, and the car first
+     moves 39 (Run1) / 33 (Run2) samples later, ~0.25 s and ~0.21 s. So t=0 is
+     the official timing start, not first motion — which is the correct origin
+     for comparison, since reaction time is part of the driver's result.
   3. **Strictly increasing.** ~20 % of samples repeat the previous `raceTime`
-     (the exporter outruns the physics tick). Duplicates are nudged apart by
-     1e-6 ms rather than dropped, so channels keep a 1:1 correspondence with raw
-     file sample indices — which matters for cross-referencing the `.rpl` frame
-     stream (see below).
+     (a frame rendered without the physics advancing — see above). Duplicates
+     are nudged apart by 1e-6 ms rather than dropped, so channels keep a 1:1
+     correspondence with raw file sample indices — which matters for
+     cross-referencing the `.rpl` frame stream (see below), itself a
+     per-frame record.
 
   Gated on a usable `raceTime` channel, so non-RSF files keep the synthetic axis
   untouched; verified no change to the ACC capture (still 5 laps, 37 channels).
@@ -802,8 +830,11 @@ Also worth recording from the same investigation, none of it implemented yet:
       penalty. Cheap, and it validates that a `.ld` and a `.rpl` describe the
       same run.
 - [ ] Capture an RSF run on a *gravel/snow* stage and a different car, to check
-      whether the 10^6 fixed-point field list and the 1009-sample pre-start idle
-      hold beyond this one tarmac/Mini combination.
+      whether the 10^6 fixed-point field list holds beyond this one tarmac/Mini
+      combination, and whether the 1009-sample pre-start window is a constant or
+      a coincidence of these two runs (see the timebase notes above — nothing
+      depends on it either way, but the mechanism is unexplained). Anna is
+      capturing these separately.
 - [ ] Decide where the `.lsp` setup parser lives (`sde-formats::rbr`) and whether
       to read the setup from the standalone file or the copy embedded in the
       `.rpl` — the latter is self-describing and can't drift from the run.
