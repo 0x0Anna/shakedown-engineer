@@ -58,11 +58,17 @@ crates/
 │   ├── adulog/            # ECUMaster
 │   ├── run/                # Race Technology
 │   ├── mlg/                # MegaLogViewer
-│   └── rbr/, dirt_rally/, acr/, ea_wrc/   # NEW: per-sim SETUP FILE adapters
+│   ├── rbr/               # RBR/RSF companion files — STARTED (`sde-rbr`).
+│   │                      #   ini.rs     — shared minimal INI reader
+│   │                      #   replay.rs  — replay metadata .ini sidecar (DONE)
+│   │                      #   todo: .lsp setup sheet, pacenote .ini, .rpl frames
+│   └── dirt_rally/, acr/, ea_wrc/         # per-sim SETUP FILE adapters
 │                                            # (read each sim's own install-dir car/track/
 │                                            #  setup files, map into sde-setup's model —
 │                                            #  same adapter pattern as telemetry parsers,
 │                                            #  but for setup data instead of channel data)
+│                                            # NOTE: RBR telemetry itself needs no adapter —
+│                                            #  RSF exports MoTeC LD, so sde-motec handles it.
 │
 ├── sde-core/              # Session/Channel/Lap data model, math channel expression
 │                          # engine, interpolation/resampling, metadata DB cache (sqlite)
@@ -618,6 +624,207 @@ don't conflate them when scoping milestone 9:
     writing the milestone 9 parser, so real column-set/value-range quirks
     (per the MoTeC lesson above) surface before, not after, implementation.
 
+### RSF real-capture validation (2026-07-26)
+
+First real RBR/RSF capture, in `.sample-data/RBR/MINI JCW - Gabiria-Legazpi 2004/`
+(gitignored): two runs of the same car on the same stage, seven minutes apart,
+each with `motec/` (`.ld`), `setup/` (`.lsp`) and `replay/` (`.rpl` + `.ini`),
+plus a shared `Pacenotes/` folder. Run1 took two "recover vehicle" penalties;
+Run2 was clean and 135 s faster on a much stiffer setup. Having a *pair* of runs
+that differ in both setup and incident is what made most of the below findings
+falsifiable — several would have looked like noise from a single capture.
+
+**RSF exports MoTeC LD directly**, so `sde-motec` is already the RBR telemetry
+path — no separate NGP text-log parser is needed for milestone 9 (the
+`Plugins\NGP\telemetry\` recorder described in the previous section is a second,
+independent source, still uncaptured). Both files parse cleanly: 185 channels of
+dotted NGP field names (`LF.brakeDiskTemp`, `vecLinearVelocityCar.x`, …) at
+54039 / 44567 samples. Two real defects surfaced, both now fixed in
+`crates/sde-formats/motec/src/lib.rs` with regression tests in its
+`rsf_ngp_tests` module (synthetic in-memory `.ld` buffers, so the multi-megabyte
+captures aren't needed to run them):
+
+- **Some int32 channels are 10^6 fixed-point with `dec_pts = 0`.**
+  `LF.brakeDiskTemp` decoded to 672533952 where the true value is 672.533952 K;
+  `brakeWear` to 2159789 for 2.159789 %. Confirmed at both ends of the stage
+  (disc cooling 672 K -> 353 K over the run is physically right). Critically,
+  this is *not* fixable from the element type: `currentTyreSegment` (0..7) and
+  `helperSpringActive` (0/1) share the same int32 type and are genuinely
+  integral. The affected fields are exactly those typed `float` in NGP's own
+  `TelemetryData.h` under `BrakeDisk { layerTemperature_, temperature_, wear_ }`,
+  so the fix is keyed on the NGP field name (`NGP_MICRO_FIXED_POINT_FIELDS`),
+  matched on the trailing dotted component so all four corners resolve to one
+  entry. A field RSF adds later that belongs on the list but isn't yet fails
+  loudly with absurd magnitudes — the safe direction to err. Display `dec_pts`
+  is also overridden to 3, since the exporter's 0 would render 2.16 % wear as a
+  flat `2 %` and discard the signal the fix just recovered.
+
+- **The declared `sample_rate` is *right*; the original diagnosis here was
+  wrong.** Recorded in full because the mistake is instructive and nearly
+  shipped.
+
+  Dividing each file's row count by its `raceTime` span gives 152.6 Hz and
+  154.3 Hz against a declared 144 Hz, differing from *each other* by 1.1 %.
+  That looked conclusive: no fixed rate fits both, so the synthetic
+  `index / sample_rate` axis must be stretching each session differently.
+  `apply_ngp_timebase` was written to rebuild the axis from `raceTime`
+  instead, subtracting penalties, back-extrapolating the countdown and
+  nudging apart the ~20 % duplicate values.
+
+  The NGP `.tsv` disproves it. NGP's recorder writes a `utcSystemTime`
+  wall-clock column that `ngp2MoTeC` drops, and against it **both captures
+  sample at 144.095 Hz** — the declared rate is right to within 0.07 %
+  (0.24 s of drift over a 368 s recording). The `.tsv` also carries
+  `totalSteps`, whose delta is exactly `telemetryTics` (5) for every one of
+  the 54038 row transitions: the row stream is perfectly uniform.
+
+  The phantom rates came from `raceTime` not spanning the recording. It is
+  the *stage* clock, so it reads a flat 0 through the countdown, jumps on a
+  penalty without wall-clock time passing, and — the part that mattered —
+  **freezes at the finish while recording continues** for a fixed ~20 s
+  run-out (2881 and 2882 rows; the car is still braking from 116 and
+  140 km/h, `distanceToEnd` running to -277 m). Dividing by a span that
+  excludes ~20 s of a ~350 s run inflates the rate by exactly the ~6 %
+  observed, and the residual difference between the two runs is just Run1's
+  longer stage.
+
+  Worse, deriving timecodes from `raceTime` **compressed that entire run-out
+  into 0.003 ms** — real telemetry destroyed. `post_finish_run_out_is_not_
+  compressed` in `rsf_ngp_tests` guards against a regression.
+
+  What `apply_ngp_timebase` does now is much smaller. The uniform axis is
+  kept; only two things are taken from `raceTime`:
+
+  1. **The origin.** The axis is shifted so t=0 is the stage start, letting
+     two runs align with no per-run offset. Countdown rows take honest
+     negative timecodes (-7006.9 ms in both, matching the `.tsv`'s measured
+     7.002 s). **`timecodes[0]` is therefore not guaranteed `>= 0`** — the
+     doc comments on `LdChannel::timecodes` and `Channel::timecodes` say so.
+     Only the origin moves; spacing is untouched.
+  2. **Penalty events.** A recovery adds a fixed 35 s to the scored clock
+     with no wall-clock time passing, so it leaves the sample axis alone and
+     is reported as a `TimePenalty` event only. Run1 yields two, at
+     219.5 s and 314.1 s, +35.0 s each; Run2 none. Corroborated by the
+     replay `.ini`: Run1 has `[RunkiSpots] Count = 2` at 4342.6 m / 5810.4 m
+     with `Tim = 35.0` each, and Run2 has no such section. **`[RunkiSpots]`
+     is the recovery-event record.** Note scored times aren't comparable
+     between a penalised run and a clean one — subtract these to compare
+     driving.
+
+  Gated on a usable `raceTime` channel, so non-RSF files are untouched;
+  verified no change to the ACC capture (still 5 laps, 37 channels).
+
+  Lesson for the next format investigation: two independent signals
+  disagreeing (144 Hz declared vs 152.6/154.3 Hz measured) does not mean the
+  declared one is wrong. Here the measurement was wrong, because the
+  denominator silently excluded part of the recording. A wall-clock column
+  settled in one query what three rounds of inference got backwards.
+
+
+### NGP native `.tsv` telemetry (2026-07-26)
+
+The previous section's open item ("no sample file captured yet") is closed —
+and it turns out the `.tsv` is not redundant with the `.ld`. NGP's recorder
+writes `Plugins\NGP\telemetry\<name>.tsv`, and `ngp2MoTeC` (shipped in the RBR
+install at `NGP2MoTeC\ngp2MoTeC.exe`) converts it to the `.ld` we parse. Both
+runs' `.tsv` are now in `.sample-data/` alongside their `.ld` (gitignored;
+85 MB and 70 MB).
+
+Format is as predicted: tab-separated, one header row of dotted field names,
+one row per `telemetryTics` physics ticks (`telemetryTics=5` in
+`RichardBurnsRally.ini`). 190 columns vs the `.ld`'s 185. The conversion is
+lossy in three ways:
+
+- **Four columns are dropped entirely**: `totalSteps` (physics tick counter),
+  `stage`, `car`, and `utcSystemTime` (wall-clock timestamp,
+  `YYYY-MM-DD HH:MM:SS.ffffff`). Two of these settled the timebase question
+  above that three rounds of inference from the `.ld` alone got wrong.
+- **Channel names are truncated to 32 characters** by the `.ld` channel record
+  (`radiatorCoolantHeatState.temperature` -> `radiatorCoolantHeatState.tempera`).
+  Five columns are affected.
+- Everything else round-trips, including the 10^6 fixed-point encoding —
+  `LF.brakeDiskTemp` reads `672235712` in the native `.tsv` too, so that
+  scaling is **NGP's own, not an artifact of `ngp2MoTeC`**.
+
+`utcSystemTime` is worth keeping in mind for `sde-video`: it's an absolute
+wall-clock reference, which is exactly what's needed to sync telemetry against
+externally-recorded video (OBS capture, phone footage) rather than relying on
+manual alignment. Not pursued yet.
+
+Not proposing a `.tsv` parser right now — the `.ld` path works and is far
+cheaper to read than 85 MB of text — but the extra columns are a real argument
+for one later, and for preferring the `.tsv` as the archival source.
+
+### Install-path discovery and configuration (design note, 2026-07-26)
+
+Per Anna: in a normal user environment the app must be pointed at the RBR
+install root (e.g. `C:\Richard Burns Rally\`), with every other location
+*inferred* from it and individually *overridable*. Verified against the live
+install on this machine, the standard layout is:
+
+| What | Path (relative to install root) |
+| --- | --- |
+| NGP telemetry (`.ld` + `.tsv`) | `Plugins\NGP\telemetry\` |
+| Telemetry field selection | `Plugins\NGP\Telemetry.ini` (+ `.sample.ini`) |
+| Sample-decimation / recording toggle | `RichardBurnsRally.ini` `[NGP]` |
+| Replays (`.rpl` + `.ini` sidecar) | `Replays\` |
+| Car setups (`.lsp`) | `SavedGames\<CarPhysicsFolder>\` |
+| Pacenote plugin + its notes | `Plugins\Pacenote\` |
+| RSF car/physics data | `rsfdata\cars\` |
+| Stage/track data | `Maps\` |
+| RSF launcher config | `RallySimFans.ini`, `rallysimfans_personal.ini` |
+
+Note the `.sample-data/` folder layout (per-run `motec/`, `setup/`, `replay/`
+subfolders) is a hand-made capture convention, **not** RSF's — real discovery
+must use the table above, not that shape.
+
+The `.ini` files double as existence checks for validating a candidate install
+root (e.g. `RichardBurnsRally.ini` + `Plugins\NGP\Telemetry.ini` both present),
+and several of them carry the settings the app needs to *read* anyway:
+`telemetryRecording`, `telemetryTics`, and the `[NGP]` field selection that
+determines which columns a recording will contain. Worth surfacing in the UI —
+"telemetry recording is currently off" is a much better first-run experience
+than an empty file list.
+
+Config model, when built: a single required install root, a resolved-path
+struct with per-path overrides, and validation that reports which expected
+paths are missing rather than failing wholesale. Probably `sde-rbr` (path
+discovery is sim-specific, and UI-free), consumed by `sde-app`.
+
+Also worth recording from the same investigation, none of it implemented yet:
+
+- **Setup `.lsp`** is a Lisp-style s-expression, 274 key/value pairs over 15
+  sections, and diffs cleanly between the two runs (front springs 26000 ->
+  45500 N/m, ARB 16000 -> 21000, brake pressure 4.0 -> 6.14 MPa, 58 values in
+  all). Two parsing quirks: each section repeats its key list with *empty*
+  values as a trailer (skip any key not followed by a numeric), and
+  `vecTopMountPosition` carries three. Run1's file has three trailing NUL bytes.
+  Values tie directly to telemetry — `TyreLF.Pressure 195000` equals the
+  `LF.pressure` channel exactly — so setup/telemetry cross-validation is
+  possible.
+- **Replay `.ini`** is plain INI and the best session-metadata source in the set:
+  stage name/ID/length, car, *the setup file used*, finish time, avg speed, tyre
+  compound, weather, surface wetness/age, damage model, NGP/RSF versions, plus
+  `[RunkiSpots]`. Cheapest high-value parser to write next.
+- **Replay `.rpl`**: offset 0 = checksum, 4 = file length, 8 = version, 12 =
+  driver name (16 B), 28 = MapID, 32 = CarSlot. **The full setup `.lsp` is
+  embedded verbatim** at 396376 (byte-identical to the standalone file), so
+  replays are self-describing. The body from ~421588 is a fixed **32-byte
+  per-frame** car-state stream with world position as plain float32 XYZ at
+  frame+8 — cross-validated against telemetry `position.x/y/z` at three widely
+  separated samples, each matching a unique offset. Not yet solved: a single
+  global frame base/phase across the whole file (phase appears to shift at a few
+  section boundaries, so a decoder needs resync), and the other 5 floats per
+  frame. Tractable now rather than opaque, but still its own project.
+- **Pacenotes `.ini`**: 293 entries. Types fall in two real namespaces — 1..298
+  (core RBR + extended) and 2004..2271 / 4075..4092 — which interleave within
+  ~0.2 m, so one spoken call is composed of several entries. 14 entries have a
+  clobbered high halfword: the recovered bytes are an exact anagram of
+  `RBR-Enhanced.ini`, i.e. an adjacent string overwrote the field. `type &
+  0xFFFF` recovers the true value in all 14 cases (every masked value lands in a
+  known range). A further 12 entries with `flag = 0` at `distance ~= 1e-05` are a
+  junk preamble. Parser rule: mask to 16 bits, drop `flag = 0`.
+
 ## Open validation tasks (do before/while coding)
 
 - [x] Read `ldparser`'s actual `struct.unpack` format strings for the real field
@@ -662,4 +869,49 @@ don't conflate them when scoping milestone 9:
         has been tested yet, so the nonzero-shift conversion-formula risk noted
         above remains unverified against real hardware data (only against the
         synthetic fixture and this one game-exported file, which happened to have
-        `shift == 0` throughout).
+        `shift == 0` throughout). The 2026-07-26 RSF capture does not close this
+        either — its channels are all `shift == 0`, `mul == 1`, `scale == 1` too.
+- [x] **Manual follow-up, RSF/RBR real-world validation (2026-07-26):** captured two
+      runs of one car/stage with telemetry, setup, replay and pacenotes (see
+      "RSF real-capture validation" above). Confirmed RSF exports MoTeC LD
+      directly, and fixed two defects it surfaced (10^6 fixed-point int32
+      channels; wrong declared `sample_rate`, replaced by a penalty-corrected
+      `raceTime` axis).
+- [x] **Replay `.ini` sidecar parser (2026-07-26):** new `sde-rbr` crate
+      (`crates/sde-formats/rbr`) with a hand-rolled minimal INI reader (`ini.rs`,
+      no new dependency) and `replay.rs`'s `ReplayInfo`. Models stage / car /
+      setup-name / result / conditions / versions plus `[RunkiSpots]` recovery
+      events, and offers `driving_time_secs()` = scored finish time minus
+      recovery penalties — the figure that actually matches the corrected
+      telemetry timebase and the only one comparable across runs. Unmodelled
+      `[Replay]` keys are kept in `extra` so a newer RSF build's additions stay
+      reachable; malformed fields degrade to `None` rather than failing the
+      file. Tested with verbatim inline copies of both sample sidecars, plus an
+      on-disk test that runs against `.sample-data/` when present and skips
+      cleanly in CI.
+- [ ] Decide how replay metadata reaches the app. `Session` is telemetry-shaped
+      and `sde-core` deliberately doesn't depend on `sde-rbr`; pairing a `.ld`
+      with its `.ini` also can't rely on the folder layout in `.sample-data/`
+      (that's a hand-made capture convention, not RSF's own). Probably belongs
+      in `sde-app` or a small session-assembly layer, not in `sde-core`.
+- [ ] Cross-check `ReplayInfo::recovery_spots` against
+      `Session::time_penalties` on load — counts should match, and each
+      `position_m` should agree with the stage distance at the corresponding
+      penalty. Cheap, and it validates that a `.ld` and a `.rpl` describe the
+      same run.
+- [ ] Capture an RSF run on a *gravel/snow* stage and a different car, to check
+      whether the 10^6 fixed-point field list holds beyond this one tarmac/Mini
+      combination. Anna is capturing these separately. (The 1009-row pre-start
+      window is no longer open: `totalSteps` = 5050 at the stage start in both
+      runs, so the countdown is a fixed physics-tick count.)
+- [ ] Build install-root configuration + path discovery (see the design note
+      above). Prerequisite for anything that loads data outside `.sample-data/`,
+      and it supersedes the "how does replay metadata reach the app" question
+      below — pairing a `.ld` with its `.rpl`/`.ini` should go through resolved
+      paths, not a folder convention.
+- [ ] Consider reading the NGP `.tsv` directly rather than the converted `.ld`,
+      to recover `utcSystemTime` (absolute wall clock — the natural anchor for
+      `sde-video` sync), `totalSteps`, and untruncated channel names.
+- [ ] Decide where the `.lsp` setup parser lives (`sde-formats::rbr`) and whether
+      to read the setup from the standalone file or the copy embedded in the
+      `.rpl` — the latter is self-describing and can't drift from the run.

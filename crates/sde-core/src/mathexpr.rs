@@ -475,6 +475,7 @@ mod tests {
             metadata: HashMap::new(),
             key_channel_map: crate::KeyChannelMap::default(),
             file_name: "test".into(),
+            time_penalties: Vec::new(),
         }
     }
 
