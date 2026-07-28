@@ -147,13 +147,13 @@ pub fn parse_bytes(data: &[u8], file_name: impl Into<String>) -> Result<IbtFile,
     let buf_len = usize::try_from(header.buf_len.max(0)).unwrap_or(0);
     let buf_offset = usize::try_from(header.var_buf[0].buf_offset.max(0)).unwrap_or(0);
     let sample_len = buf_len * record_count;
-    let samples = data
-        .get(buf_offset..buf_offset + sample_len)
-        .ok_or(IbtError::TruncatedSampleBuffer {
-            offset: buf_offset,
-            len: sample_len,
-            file_len: data.len(),
-        })?;
+    let samples =
+        data.get(buf_offset..buf_offset + sample_len)
+            .ok_or(IbtError::TruncatedSampleBuffer {
+                offset: buf_offset,
+                len: sample_len,
+                file_len: data.len(),
+            })?;
 
     let tick_rate = header.tick_rate.max(1);
     // `record_count` (samples per channel) is realistically in the tens
@@ -166,17 +166,22 @@ pub fn parse_bytes(data: &[u8], file_name: impl Into<String>) -> Result<IbtFile,
     let num_vars = header.num_vars.max(0);
     let mut channels = Vec::with_capacity(usize::try_from(num_vars).unwrap_or(0));
     for i in 0..num_vars {
-        let offset = header.var_header_offset as usize + usize::try_from(i).unwrap_or(0) * VAR_HEADER_LEN;
-        let slice = data
-            .get(offset..)
-            .ok_or(IbtError::TruncatedVarHeader {
-                index: i,
-                offset,
-                file_len: data.len(),
-            })?;
+        let offset =
+            header.var_header_offset as usize + usize::try_from(i).unwrap_or(0) * VAR_HEADER_LEN;
+        let slice = data.get(offset..).ok_or(IbtError::TruncatedVarHeader {
+            index: i,
+            offset,
+            file_len: data.len(),
+        })?;
         let mut var_cursor = Cursor::new(slice);
         let var: RawVarHeader = var_cursor.read_le()?;
-        channels.push(decode_var(samples, record_count, buf_len, &var, &timecodes)?);
+        channels.push(decode_var(
+            samples,
+            record_count,
+            buf_len,
+            &var,
+            &timecodes,
+        )?);
     }
 
     filter_gps(&mut channels);

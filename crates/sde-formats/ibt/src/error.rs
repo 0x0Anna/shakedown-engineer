@@ -13,9 +13,7 @@ pub enum IbtError {
     #[error("failed to parse binary structure: {0}")]
     Binrw(#[from] binrw::Error),
 
-    #[error(
-        "file declares {num_buf} sample buffers; only single-buffer .ibt files are supported"
-    )]
+    #[error("file declares {num_buf} sample buffers; only single-buffer .ibt files are supported")]
     UnsupportedBufferCount { num_buf: i32 },
 
     #[error("variable {name:?} has unknown type {var_type} (expected 0..=5)")]
@@ -35,7 +33,9 @@ pub enum IbtError {
         file_len: usize,
     },
 
-    #[error("session info block (offset {offset}, len {len}) runs past end of file (size {file_len})")]
+    #[error(
+        "session info block (offset {offset}, len {len}) runs past end of file (size {file_len})"
+    )]
     TruncatedSessionInfo {
         offset: usize,
         len: usize,

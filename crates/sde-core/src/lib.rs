@@ -482,10 +482,7 @@ fn laps_from_lap_channel(channels: &HashMap<String, Channel>) -> Option<Vec<Lap>
         return None;
     }
     let n = lap.values.len();
-    if n == 0
-        || lapdist.values.len() != n
-        || speed.values.len() != n
-        || speed.timecodes.len() != n
+    if n == 0 || lapdist.values.len() != n || speed.values.len() != n || speed.timecodes.len() != n
     {
         return None;
     }

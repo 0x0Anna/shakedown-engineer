@@ -87,7 +87,10 @@ fn splits_laps_from_lap_channel() {
     assert_eq!(key.long.as_deref(), Some("Lon"));
     assert_eq!(key.alt.as_deref(), Some("Alt"));
 
-    assert_eq!(session.metadata.get("Driver").map(String::as_str), Some("Test Driver"));
+    assert_eq!(
+        session.metadata.get("Driver").map(String::as_str),
+        Some("Test Driver")
+    );
     assert_eq!(
         session.metadata.get("Venue").map(String::as_str),
         Some("Synthetic Test Track")

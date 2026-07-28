@@ -41,8 +41,8 @@ fn parses_synthetic_fixture() {
             .unwrap_or_else(|e| panic!("failed to parse {expected_path:?}: {e}"))
     };
 
-    let ibt_file = sde_ibt::parse(&ibt_path)
-        .unwrap_or_else(|e| panic!("failed to parse {ibt_path:?}: {e}"));
+    let ibt_file =
+        sde_ibt::parse(&ibt_path).unwrap_or_else(|e| panic!("failed to parse {ibt_path:?}: {e}"));
 
     assert_eq!(
         ibt_file.channels.len(),
@@ -79,7 +79,11 @@ fn parses_synthetic_fixture() {
             channel.name
         );
 
-        for (i, (actual, expected_val)) in channel.values.iter().zip(expected_values.iter()).enumerate()
+        for (i, (actual, expected_val)) in channel
+            .values
+            .iter()
+            .zip(expected_values.iter())
+            .enumerate()
         {
             assert!(
                 (actual - expected_val).abs() < EPSILON,
