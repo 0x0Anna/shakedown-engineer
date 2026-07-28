@@ -58,6 +58,9 @@ crates/
 │   ├── adulog/            # ECUMaster
 │   ├── run/                # Race Technology
 │   ├── mlg/                # MegaLogViewer
+│   ├── shtep/              # SimHub TSV export (companion plugin repo `../shtep`) —
+│   │                       #   DONE (`sde-shtep`). No TrackDataAnalysis oracle (bespoke
+│   │                       #   schema, not a port) — `../shtep/SCHEMA.md` is authoritative.
 │   ├── rbr/               # RBR/RSF companion files — STARTED (`sde-rbr`).
 │   │                      #   ini.rs     — shared minimal INI reader
 │   │                      #   replay.rs  — replay metadata .ini sidecar (DONE)
@@ -162,6 +165,13 @@ crates/
     explicit `Lap` variable directly, so milestone 4 shouldn't need a beacon-style
     state machine for iRacing files.
   (Local reference repo: `../iracing-telemetry-tool`)
+- **`shtep` (SimHub Telemetry Export Plugin)** — companion repo, `../shtep`, C#/SimHub
+  PluginSDK. Writes `{base}.tsv` + `{base}.meta.json` sidecar pairs per its own
+  `SCHEMA.md` (v1.1). **Not a port** — this is a bespoke format this project's own
+  companion plugin defines, so `SCHEMA.md` is the authoritative spec directly, no
+  `TrackDataAnalysis` oracle involved. `sde-formats/shtep` implements the Rust-side
+  reader; the plugin repo owns recording only (no `.ld`/`.ibt`/MoTeC knowledge lives
+  there by design). See milestone 4 below for what's implemented.
 
 ### Validation findings (2026-07-20)
 
@@ -212,6 +222,137 @@ code reading and a generated synthetic `.ld` file (see below). Findings:
   can't (e.g. nonzero shift, non-float32 channels, `Beacon`/lap-marker channels,
   populated venue/vehicle sub-records).
 
+### IBT (iRacing) format findings (2026-07-27)
+
+Cross-checked `TrackDataAnalysis/data/iracing.py` (`_decode`/`_decode_var`/`_find_laps`/
+`_filter_gps`) against real `.ibt` captures now in `.sample-data/iRacing/` (a Hell RX
+rallycross session with a Joker lap, and a Mt. Washington Hillclimb stage). Verified the
+byte offsets below with a standalone Python re-implementation of the oracle's
+`struct.unpack_from` calls against one of the real files (`Mt Washington Hillclimb/
+Subaru_WRX_STI/*.ibt`) before writing any Rust:
+
+- **Fixed 144-byte header at offset 0** (little-endian), read as
+  `struct.unpack_from('<10i12xi', m, 0)` in the oracle:
+  - `+0`: `ver` (i32)
+  - `+4`: `status` (i32)
+  - `+8`: `tick_rate` (i32, Hz — e.g. `60`)
+  - `+12`: `session_info_update` (i32, unused by the oracle)
+  - `+16`: `session_info_len` (i32) — byte length of the trailing YAML block
+  - `+20`: `session_info_offset` (i32) — absolute file offset of the YAML block
+  - `+24`: `num_vars` (i32) — channel/variable count
+  - `+28`: `var_header_offset` (i32) — absolute file offset of the first
+    `RawVarHeader` record (real IBT header is `irsdk_header`, but nothing
+    downstream needs to assume this equals 144; always read it from the field)
+  - `+32`: `num_buf` (i32) — the oracle only ever reads buffer 0 and just prints a
+    warning if this isn't `1`; real captures always have exactly one buffer, so the
+    Rust port also only reads `varBuf[0]` (not an error, matching the oracle)
+  - `+36`: `buf_len` (i32) — stride in bytes between consecutive sample records
+  - `+40..48`: `pad1[2]` (unused)
+  - `+48..112`: `varBuf[4]`, each `{ tick_count: i32, buf_offset: i32, pad: [i32; 2] }`
+    (16 bytes) — only `varBuf[0].buf_offset` at `+52` is used
+  - `+112`: `irsdk_diskSubHeader` (32 bytes), read as
+    `struct.unpack_from('<I4xddii', m, 112)`:
+    - `+112`: `session_start_date` (u32, Unix `time_t`) — 4 bytes of padding follow
+      (`4x`), so this is *not* a full 8-byte `time_t`, just the low 32 bits
+    - `+120`: `session_start_time` (f64, seconds)
+    - `+128`: `session_end_time` (f64, seconds)
+    - `+136`: `session_lap_count` (i32)
+    - `+140`: `session_record_count` (i32) — number of sample records in the buffer
+  - Confirmed against the real file: `var_header_offset=144`,
+    `session_info_offset = 144 + num_vars*144` (var headers are contiguous, 144 bytes
+    each), and `varBuf[0].buf_offset = session_info_offset + session_info_len`
+    (sample buffer immediately follows the YAML block) — the three regions are
+    laid out back-to-back with no gaps in practice.
+- **144-byte `RawVarHeader` records**, `num_vars` of them starting at
+  `var_header_offset`, per `_decode_var`'s
+  `struct.unpack_from('<3ib', m, offs)` + fixed string fields:
+  - `+0`: `type` (i32) — index into `['c', '?', 'i', 'I', 'f', 'd']`: `0`=char(1B),
+    `1`=bool(1B), `2`=int32 signed(4B), `3`=bitfield/u32(4B), `4`=float32(4B),
+    `5`=float64(8B)
+  - `+4`: `offset` (i32) — this variable's byte offset *within* each `buf_len`-wide
+    sample record (not an absolute file offset)
+  - `+8`: `count` (i32) — array length for vector variables (e.g. per-wheel). **The
+    oracle ignores this and only ever decodes a single scalar per record** (ports
+    faithfully — ignoring `count` means multi-element vars only get element 0; flagged
+    as a known simplification inherited from the oracle, not a bug to "fix" in the
+    Rust port without also fixing/porting a change upstream first)
+  - `+12`: `count_as_time` (u8, 3 bytes padding) — unused by the oracle
+  - `+16`: `name` (32 bytes, ASCII, NUL-padded)
+  - `+48`: `desc` (64 bytes) — unused by the oracle
+  - `+112`: `unit` (32 bytes, ASCII, NUL-padded)
+- **Sample data**: a single buffer of `session_record_count` fixed-width records,
+  each `buf_len` bytes, starting at `varBuf[0].buf_offset`. A variable's values are
+  read with a strided view: byte `record_index * buf_len + var.offset`, width per its
+  type. Timecodes are synthetic and uniform, `record_index * (1000 / tick_rate)` ms —
+  matching MoTeC's `index / sample_rate` axis in shape, so `sde-core`'s existing
+  `Channel.timecodes` contract (strictly increasing ms) needs no special-casing.
+  `dec_pts = 2` and `interpolate = true` for float/double types (rtype 4/5); all other
+  types are treated as discrete (`interpolate = false`, `dec_pts = 0`), mirroring
+  MoTeC's `interpolate` split between continuous and event/state channels.
+  A variable whose `unit` is exactly `"%"` is stored as a 0..1 ratio in the file; the
+  oracle multiplies by 100 to get an actual percentage — ported as-is.
+- **Session metadata is a trailing YAML document** (`session_info_offset` /
+  `session_info_len`), *not* part of the fixed binary layout — confirmed ~14.7 KB of
+  YAML in the real Mt. Washington capture, with `WeekendInfo.TrackDisplayName` (venue)
+  and `DriverInfo.Drivers[].UserName` matched against `DriverInfo.DriverUserID` (the
+  active driver, since replays/other cars' data can also appear in `Drivers`). The
+  oracle only reads these two facts plus the binary header's `session_start_date` (for
+  `Log Date`/`Log Time`, formatted via `time.localtime`); the Rust port deserializes
+  only the needed sub-shape via `serde_yaml`, tolerating unknown fields, rather than
+  modeling the entire session-info schema (dozens of unused sections:
+  `SessionInfo`, `CameraInfo`, `RadioInfo`, `SplitTimeInfo`, `CarSetup`, etc.) —
+  matching the oracle's own narrow read, and avoiding a large speculative surface no
+  current feature needs. `Log Date`/`Log Time` are formatted from
+  `session_start_date` treating it as UTC (not local time like the Python oracle,
+  which depends on the *parsing* machine's timezone, not the recording sim's — an
+  already-nondeterministic choice not worth replicating) — done with a small
+  self-contained days/seconds-since-epoch decomposition rather than pulling in a date
+  crate for two formatted strings.
+- **Lap splitting is deliberately *not* part of `sde-ibt`** (unlike GPS
+  zero-filtering, kept in the crate — see below), mirroring the MoTeC crate's split:
+  `sde-motec` doesn't derive laps either, `sde-core::laps_from_beacon` does. IBT
+  exposes an explicit `Lap` channel directly (confirmed present in both sample
+  captures) plus `LapDist`/`Speed`, so `sde-core` gets an analogous
+  `laps_from_lap_channel`, porting `_find_laps`'s "lap number changed, back-compute
+  the exact crossing time from `LapDist`/`Speed` rather than trusting the lap-counter
+  sample's own timecode" state machine verbatim (milestone 4/6 boundary: parser crate
+  stays format-only, `sde-core` remains the one place session-level derived state —
+  laps for every format — lives).
+- **GPS zero-filtering (`_filter_gps`) stays in `sde-ibt`, not `sde-core`** — unlike
+  lap-splitting, this is a per-format data-quality fixup (iRacing logs `Lat`/`Lon`/`Alt`
+  as `0` before GPS lock acquires, or for cars/replay data that never had it), not a
+  cross-format derived-state concern, so it belongs with the rest of the format-specific
+  decode step, applied only when all three of `Lat`/`Lon`/`Alt` are present.
+- **Rallycross Joker lap** (Hell RX sample): confirmed iRacing's `Lap` channel just
+  increments through a Joker lap like any other lap — no separate "took the joker"
+  channel found in the sampled var list, so distinguishing a Joker lap from a normal
+  one (if ever needed) would have to come from track-geometry/distance analysis in a
+  later milestone, not from anything `sde-ibt` can expose directly.
+- Both real sample files (`.sample-data/iRacing/Hell RX/…`, `.sample-data/iRacing/Mt
+  Washington Hillclimb/…`) parse successfully against this layout (manually verified,
+  not committed as test fixtures — the smallest is ~4.8 MB, too large for
+  `tests/fixtures/`). A small hand-built synthetic `.ibt` buffer with known values is
+  the committed fixture instead (no existing library can round-trip-write real IBT
+  files the way `ldparser` does for `.ld`), same pattern as MoTeC's `synthetic.ld`.
+  Getting real files down to a trimmed fixture size (few samples, few channels) remains
+  a **manual follow-up**, not a blocker.
+  - The Mt. Washington capture: 26207 records, altitude climbs 465 m → 1878 m
+    (a hillclimb, not a lap circuit — matches expectations), `SessionTime` starts at
+    ~29 s (countdown before the timed run) and the stage completes at ~466 s.
+  - The larger Hell RX capture: 29660 records, `Lap` running 0..11 (several laps plus
+    the Joker lap the user drove — iRacing's `Lap` channel just increments through a
+    Joker lap like any other, per the finding above). The smaller same-track capture
+    parses to 0 records (`session_record_count = 0`) — a session that was started and
+    immediately stopped; not a parser bug, just an empty recording.
+  - **Non-ASCII venue names decode lossy, not oracle-faithfully**: `Lånkebanen`'s
+    session-info YAML round-trips through `from_utf8_lossy` as `L�nkebanen` — the
+    stream isn't valid UTF-8 despite the YAML body's own (unused-by-the-parser)
+    `Encoding: ISO_8859_1` field. `serde_yaml`/PyYAML both assume UTF-8-or-BOM-detected
+    input; neither actually honors that in-band field. The Rust port degrades
+    gracefully (no panic, garbled string) rather than erroring — arguably better than
+    the Python oracle, which would raise `UnicodeDecodeError` on this exact file.
+    Full Latin-1-aware YAML decoding is a possible future improvement, not a blocker.
+
 ## Milestone sequence
 
 1. **MoTeC LD parser** *(done, 2026-07-21 — see `crates/sde-formats/motec`)* — using `binrw` for the
@@ -254,6 +395,78 @@ code reading and a generated synthetic `.ld` file (see below). Findings:
    lap selection/comparison.
 4. **Remaining telemetry format parsers** — XRK, IBT, VBOX, ADULOG, RUN, MLG, each
    behind the shared `LogFormat` trait.
+   *(IBT done, 2026-07-27 — see `crates/sde-formats/ibt`)*: parses the fixed
+   header/variable-header-array/strided-sample-buffer layout plus the trailing
+   session-info YAML block (`serde_yaml`, narrow struct — only `Driver`/`Venue`, not
+   the full schema), ported from `TrackDataAnalysis/data/iracing.py`; see
+   "IBT (iRacing) format findings" above for the full byte layout and the design
+   choices (GPS zero-filtering stays in the crate, lap-splitting doesn't). Validated
+   against real captures added to `.sample-data/iRacing/` (a Hell RX rallycross
+   session with a Joker lap, a Mt. Washington Hillclimb stage) plus a committed
+   synthetic fixture (`tests/fixtures/synthetic.ibt`, cross-checked against an
+   independent Python re-decode). Wired into `sde-core::Session::load_ibt` — new
+   `laps_from_lap_channel` ports `_find_laps`'s `Lap`/`LapDist`/`Speed`-based
+   crossing-time back-computation (analogous to `laps_from_beacon` for MoTeC), and
+   `dump_channels` now dispatches on file extension (`.ld` vs `.ibt`).
+   *(IBT lap-splitting bug fix, 2026-07-27):* `sde-app`'s "Open file..." dialog only
+   ever offered `.ld` — `.ibt` had no GUI path to load at all until this pass added an
+   `.ibt` filter and extension-based dispatch to `main.rs`'s `load_file`, mirroring
+   `dump_channels`'s existing dispatch. That exposed a real, previously-untested bug
+   in `laps_from_lap_channel`: ported near-verbatim from TDA's `_find_laps`, it treats
+   any transition to `Lap == 0` as "probably no more useful data" and stops looking
+   for further laps right there — the real Hell RX rallycross capture (see above)
+   disproves that assumption outright, its `Lap` channel going `0 -> 1 -> 0 -> 1 -> 2
+   -> … -> 11` (a brief `Lap == 1` during the pre-green-flag formation movement,
+   then the counter resets to `0` at the actual race start and counts up through
+   eleven real racing laps afterward). The oracle's heuristic truncated lap
+   detection to the session's first ~16.6s (2 laps) out of a real ~494s recording (the
+   correct read is 16 boundaries/laps, averaging ~40s each, consistent with this
+   rallycross layout). Fixed by treating every `Lap` value change uniformly —
+   including a drop back to `0` — as an ordinary boundary, the same way
+   `laps_from_beacon` and `sde-shtep`'s `laps_from_lap_number_channel` (below) already
+   do, rather than special-casing zero — a deliberate, documented divergence from the
+   Python oracle, not a straight port anymore. While in this function, also hardened
+   the `LapDist`/`Speed` crossing-time back-computation against a `speed == 0`
+   transition sample (the real capture has exactly this at its very last sample),
+   which could otherwise divide out to a non-finite `f64` and corrupt every boundary
+   after it — falls back to the sample's own raw timecode when the back-computed
+   value isn't finite. Two new unit tests in `sde-core/src/lib.rs`
+   (`lap_channel_tests`) cover both: the real capture's zero-reset shape, and the
+   zero-speed division case. **Known cosmetic artifact, not fixed:** the real Hell RX
+   file's very last sample has a one-sample `Lap` flicker (`0 -> 11`, real telemetry
+   noise, not a parsing bug) that now surfaces as one spurious 0.0s-duration lap
+   entry in the picker; no general "drop degenerate-length laps" filter was added to
+   paper over it, since that's a judgment call better made with more real files to
+   validate against, not guessed at from one capture's glitch.
+   *(`shtep` TSV parser done, 2026-07-27 — see `crates/sde-formats/shtep`)*: not part
+   of the original XRK/IBT/VBOX/ADULOG/RUN/MLG list above — added because the `../shtep`
+   companion plugin (SimHub Telemetry Export Plugin) needs a Rust-side reader for what
+   it writes. Plain text, no binary layout to reverse-engineer: a `{base}.tsv` (tab-
+   separated, `Time_s` first column always, one configurable-subset column per
+   canonical channel, matched by header name not position) plus a `{base}.meta.json`
+   sidecar (session/car/driver metadata, `sessionType` "stage"/"stint",
+   `schemaVersion`-gated backward compatibility — a newer-than-understood version is
+   refused, everything else tolerated). No real plugin-exported fixture exists yet
+   (the plugin is still being built, no `.tsv`/`.meta.json` pairs committed there) —
+   the committed test fixture (`tests/fixtures/synthetic.tsv`/`.meta.json`) is
+   hand-authored directly from `SCHEMA.md`, same role the other crates' synthetic
+   fixtures play, swap for a real plugin export once one exists. Channel
+   unit/interpolate/dec_pts metadata is derived from the header name itself (`_kmh`,
+   `_pct`, `_deg`, `_mm`/`_m` suffixes; `Paused`/`Discontinuity`/`Gear`/`LapNumber`
+   treated as discrete) since `SCHEMA.md` bakes units into the column name rather than
+   declaring them separately, unlike MoTeC/IBT. Wired into `sde-core::Session::load_shtep`
+   — `laps_from_lap_number_channel` is new, boundary-per-`LapNumber`-change (simpler
+   than IBT's back-computed crossing time; `SCHEMA.md`'s fixed 100 Hz default sample
+   rate makes the imprecision a small enough window not to be worth the extra
+   complexity here) and only consulted for `"stint"` sessions — a `"stage"` recording
+   is one continuous run by definition (stage-start to stage-end, one file), so it
+   always gets a single whole-session lap. `KeyChannelMap::distance` now also checks
+   `"LapDistance_m"`. Sidecar `discontinuities`/`rewinds` arrays are parsed and exposed
+   on `ShtepFile` but not yet consumed by `sde-core` (both describe different things
+   than RBR/NGP's `TimePenalty` — a discontinuity/rewind isn't a scoring deduction) —
+   a documented follow-up, not forced into that model. `sde-app`'s "Open file..."
+   dialog does **not** yet offer `.tsv` — out of scope for this pass, matching how the
+   `.ibt` GUI wiring landed separately from the `sde-ibt` parser crate itself.
 5. **Core UI parity** — worksheets/docks, channel search, lap selection/comparison,
    math channels (matching the original tool's baseline usefulness).
    *(In progress, 2026-07-21)* Channel search + lap selection landed first, as the
@@ -347,6 +560,38 @@ code reading and a generated synthetic `.ld` file (see below). Findings:
    All four milestone-5 sub-features (worksheets/docks, channel search, lap
    selection/comparison, math channels) are now implemented — see
    `crates/sde-app` and `crates/sde-core/src/mathexpr.rs`.
+
+   *(Discrete-channel indicators — scoped 2026-07-27, not started.)* Today every
+   channel, including discrete/state ones, is just another line-graph dock — there's
+   no dedicated display for "what state is the car in right now at the cursor".
+   Prompted by `sde-ibt` (milestone 4) exposing iRacing enum channels
+   (`PlayerTrackSurface` = `irsdk_TrkLoc`: off-track/approaching-pits/on-track/etc.,
+   `PlayerTrackSurfaceMaterial` = `irsdk_TrkSurf`: asphalt/dirt/gravel/grass/etc.,
+   `TrackWetness` = `irsdk_TrackWetness`) plus plain analog ones worth calling out
+   specially (`HandbrakeRaw`, `ClutchRaw`) — same category as the ABS/TC intervention
+   channels MoTeC/RSF captures already carry, which today are equally just raw traces.
+   Two-part scope:
+   1. **Enum label mapping** — a small `channel name -> (raw value -> label)` lookup,
+      *display-only*: `sde-ibt`/`sde-motec` keep returning raw numeric values (the
+      format-parser boundary faithfully mirrors what TDA's oracles do, and staying
+      numeric keeps match-expression/math-channel logic simple). Proposed home:
+      `sde-core`, not `sde-app` — so `sde-cli`'s `dump_channels` can also print labels,
+      and so it isn't duplicated if/when a second UI surface exists. **Blocked on
+      sourcing the actual enum tables**: neither `TrackDataAnalysis/data/iracing.py`
+      nor `../iracing-telemetry-tool` (this project's two iRacing reference repos)
+      define them — they only read numeric values through, same as `sde-ibt` does now.
+      Needs iRacing's own public SDK header (`irsdk_defines.h`, from the iRacing SDK
+      download) as a new oracle before writing the mapping — do not guess at the
+      variant order/values from memory; a wrong mapping (e.g. swapping `Gravel`/
+      `Grass`) is worse than no label. New open validation task, tracked below.
+   2. **UI indicator strip** — a small horizontal strip in `sde-app` (`ui/app.slint`),
+      separate from the line-graph docks, showing current discrete-channel state at
+      the shared cursor position: a colored surface swatch/icon, handbrake on/off,
+      similar treatment for ABS/TC intervention markers. Reuses the cursor-position
+      plumbing the per-dock readouts (`cursor-values`) already have; doesn't need a
+      new interaction model, just a new small render target fed by the same lookup.
+   Not started — this is a scoping note, not an implementation plan; sizing/sequencing
+   happens when milestone 5 (or a follow-on) picks it up.
 
    *(Post-milestone polish, 2026-07-21, prompted by reviewing a screenshot of
    the worksheet):* a real screenshot of the lap-comparison view (against
@@ -825,6 +1070,170 @@ Also worth recording from the same investigation, none of it implemented yet:
   known range). A further 12 entries with `flag = 0` at `distance ~= 1e-05` are a
   junk preamble. Parser rule: mask to 16 bits, drop `flag = 0`.
 
+### UI/UX direction: telemetry dashboard, reimagined (design note, 2026-07-27)
+
+Reviewed four screenshots of Pi Research's Pi Toolbox (a professional circuit-racing
+telemetry tool) against the same iRacing Hell RX capture `sde-ibt` now parses, for
+inspiration — **not** as a feature checklist to clone. Screenshots aren't committed
+(personal captures of third-party software, not project sample data); the design
+decisions below are. Per Anna: Pi Toolbox's interface itself reads as archaic —
+dense 1990s-MDI window management, not a bar to match. The goal stays what
+`PROJECT_PLAN.md`'s Overview already states: "a modern, clean UX… not just parity
+with the dated original" — that principle now extends past the original
+`TrackDataAnalysis` Qt tool to this newer reference point too.
+
+**What to explicitly *not* copy** (the parts of Pi Toolbox's UX that are dated, not
+just old-looking):
+- **Floating MDI docks**, each independently draggable/resizable/closable with its
+  own title bar, lock icon, maximize button — non-responsive by construction (every
+  pane has a fixed pixel position that a window resize doesn't reflow), and the
+  chrome-per-pane overhead dominates the screen at anything less than a large
+  monitor.
+- **Tab-per-preset workspaces** (`Driver` / `Driver Braking Data` / `Tyre Data` /
+  `Throttle/Brake Analysis`) that are really four separate fixed dock layouts a user
+  built by hand — switching "views" means switching to an entirely different,
+  independently-laid-out screen, not a filtered/reconfigured version of one coherent
+  dashboard.
+- **Flat, exhaustive property dumps** (the `DriverInfo:Drivers:0:CarClassWeightPenalty`-
+  style sidebar, the "Important Channel Values" table showing `No Value` rows for
+  systems the car doesn't even have) — everything at equal visual weight, nothing
+  curated or grouped, forcing the user to already know what they're looking for.
+- **Skeuomorphic gauges** (analog speedometer-style dial for steering angle) that
+  cost far more screen space than a number/sparkline for the same information
+  density, and don't scale down.
+
+**Design principles for `sde-app` going forward:**
+1. **One responsive canvas, not floating windows.** The existing worksheet/dock
+   model (milestone 5) is the right foundation — extend it, don't bolt an MDI
+   window manager onto it. Docks reflow (stack, resize, collapse) as the window
+   resizes, the way a modern web dashboard does, not as independently positioned
+   panes that just get cut off.
+2. **Saved views are filters/layouts over one dashboard, not separate screens.**
+   Pi Toolbox's tab-per-preset becomes a picker that reconfigures which docks are
+   visible and how they're arranged within the same responsive canvas — switching
+   "Tyre Data" to "Braking Data" rearranges, it doesn't teleport to an unrelated
+   fixed layout.
+3. **Distance as the primary x-axis**, time as a togglable secondary mode — every
+   Pi Toolbox dock reviewed plots against distance (m), confirming the gap already
+   noted in milestone 3's deferred list. This matters more for rally/hillclimb
+   content than it did for circuit racing: distance is stage-relative and
+   comparable across runs even when pace (and therefore elapsed time at a given
+   point) differs.
+4. **"Run", not "Lap", as the primary unit — a rally-native model, not a
+   circuit-racing one ported as-is.** Pi Toolbox's lap-selector bar assumes laps;
+   this project's real content spans laps (rallycross, with a Joker lap — see the
+   IBT findings above), a single continuous stage with no intermediate crossings
+   (hillclimb, RBR/RSF), and eventually point-to-point WRC/Dirt Rally stages. The
+   selector should present whatever `Session::laps` actually contains — one entry
+   for a single-stage run, several for a lapped session — rather than assuming a
+   lap-timed circuit and degrading awkwardly for stage formats.
+5. **Indicators surface analysis, not just raw enums.** The "Bit Indicator"
+   concept (validated as worth building — see the earlier "Discrete-channel
+   indicators" milestone-5 note, which this section supersedes/absorbs) shouldn't
+   stop at relabeling raw channel values (`PlayerTrackSurfaceMaterial` = "Gravel").
+   Once `sde-analysis` exists (milestone 7), the same indicator strip is the
+   natural home for *derived* engineering signals — ABS/TC intervention
+   count/duration, brake-balance effectiveness — which is this project's actual
+   differentiator per the Overview ("analyzing the vehicle, not just the driver").
+   Raw-enum indicators can ship first as the milestone-5-scale version; the strip's
+   design shouldn't paint itself into "raw channel passthrough only."
+6. **Curated metadata, progressive disclosure.** Group session/setup/weather/car
+   fields semantically and hide anything with no meaningful value by default
+   (no `No Value` rows cluttering a glance-able summary); the full raw property
+   list stays available (search/expand), it just isn't the default view.
+7. **Track map as a configurable analysis overlay, not a fixed pedal-state
+   palette.** `sde-gis` (currently unstarted) is the natural home for this; Pi
+   Toolbox's throttle/brake-colored track ("Summit" dock) is one useful overlay
+   mode among several worth supporting — ABS/TC intervention zones, or (once
+   `sde-formats::rbr` parses pacenotes/setup) pacenote sector or setup-change
+   markers laid over the same geometry.
+8. **Setup-diff-aware comparison.** Pi Toolbox's lap-delta view is
+   performance-only (`LapDeltaCompare` vs. distance) with no way to see *why* —
+   because Pi Toolbox has no setup model. This project's `sde-setup` does. A
+   comparison view that shows a performance delta trace next to what actually
+   changed between the two runs' setups (front ARB, brake bias, etc.) is a
+   genuinely differentiated feature Pi Toolbox structurally cannot offer, not
+   just a restyle of what it already has.
+9. **Visual language**: theme-aware (light/dark, matching the system/user
+   preference — not Pi Toolbox's fixed dark-with-magenta-titlebars skin), a
+   consistent, restrained color palette reused across every widget (graphs,
+   indicators, track-map overlays) rather than each dock choosing its own
+   red/green/purple/yellow scheme independently, and legible-at-a-glance
+   information density (numbers/sparklines over gauges) — the same "read as one
+   system" bar this project already holds visualizations to elsewhere.
+
+Not started — this is a design note superseding the narrower "Discrete-channel
+indicators" scoping under milestone 5 above (still correct in its specifics — enum
+mapping layer in `sde-core`, blocked on sourcing `irsdk_defines.h` — just now framed
+as one instance of principle 5 rather than a standalone feature). Sizing/sequencing
+into concrete milestone-5/7/`sde-gis` work happens separately.
+
+*(Principles 3 and 4 implemented, 2026-07-27):* distance x-axis mode and "Run"
+terminology, the two most immediately implementable principles (the rest are
+blocked on the enum source, or on `sde-gis`/`sde-setup`, both unstarted).
+- **Distance axis (principle 3):** `sde_core::KeyChannelMap` gained a `distance:
+  Option<String>` field, populated the same way as `speed`/`lat`/`long`/`alt` via a
+  new `DISTANCE_CHANNEL_NAMES` candidate list (`["LapDist", "Distance"]` — IBT's own
+  name first, since it's a confirmed real channel per the IBT findings above; a
+  generic `"Distance"` fallback for MoTeC, unvalidated against real hardware, same
+  caveat as `BEACON_CHANNEL_NAMES`). `sde-app`'s `graph.rs` gained `AxisMode` (`Time`
+  default / `Distance`) threaded through `build_lap_comparison_plot` as two new
+  parameters (`axis`, `distance_channel: Option<&Channel>`); lap/zoom *selection*
+  stays entirely time-based (unchanged) — only the plotted x-coordinate switches
+  from `t - start` to `distance_channel.value_at(t) - distance_channel.value_at(start)`
+  per range, still independently rebased to `0` the same way time-mode already was.
+  `AxisMode::Distance` with no distance channel available transparently behaves like
+  `AxisMode::Time` — callers (and the UI toggle) don't need to branch on
+  availability. Cursor lookups needed real new logic, not just a threaded parameter:
+  a cursor drag's `fraction` now means "fraction along the distance axis," and two
+  compared runs generally aren't at the same *elapsed time* at the same *distance* —
+  that's the entire point of a distance comparison — so each range needs its own
+  absolute time, found by inverting the distance channel. New `graph::time_at_distance`
+  windows the distance channel to the specific `[start, end]` range first (via the
+  existing `windowed_samples`) before searching — necessary because a channel like
+  `LapDist` resets to `0` every lap and is therefore only monotonic *within* one lap;
+  searching the raw unwindowed channel would feed `value_at_raw`'s bracket search a
+  non-sorted array and silently return a bracket from the wrong lap (caught by a unit
+  test, `time_at_distance_stays_within_its_own_lap_despite_the_reset`). `main.rs`'s
+  `cursor_text_for_group` was refactored to take a list of already-resolved absolute
+  times (one per range) instead of computing one shared `t_rel` internally, and a new
+  `cursor_abs_times` picks between the old shared-offset logic (time mode) and the
+  per-range inversion (distance mode). UI: a small "Axis: Time/Distance" toggle chip
+  in `app.slint`'s layout-mode row, greyed out (but still clickable — falls back
+  harmlessly) when the loaded session has no distance channel; the bottom cursor
+  readout is now fully formatted in Rust (`"t = 12.3 ms"` / `"d = 45.6 m"`) since
+  which one applies depends on the active mode. **Known limitation, not fixed:** a
+  single "All" range spanning *multiple* laps would still sawtooth in distance mode
+  (each lap's `LapDist` resets to 0) — out of scope for the rally/hillclimb
+  single-stage content (exactly one lap, see below) this was built for; a genuinely
+  multi-lap circuit session should stick to per-lap/comparison views in distance mode.
+- **"Run" terminology (principle 4):** `graph::lap_labels` now special-cases a
+  session with exactly one lap (a continuous stage/hillclimb run, not a lap-timed
+  circuit) to return a single `"Full Run (…s)"` label instead of the previous
+  `["All", "Lap 1 (…s)"]` pair showing the identical range twice under a
+  circuit-assuming name. `index 0` still means "the whole session" either way, so no
+  downstream indexing changed. `app.slint`'s header label next to the lap/run
+  `ComboBox` switches from `"Lap:"` to `"Run:"` when `lap-labels.length == 1`.
+
+*(Default worksheet panels, 2026-07-27):* a freshly loaded session previously started
+either from one bare channel (`pick_default_channel`'s alphabetical-first-interpolating
+pick) or a fully empty worksheet — neither matches the "glance-able default view"
+every established telemetry tool (MoTeC i2, Pi Toolbox) opens with. New
+`graph::default_dock_channels` builds one dock per role in a fixed
+`DEFAULT_DOCK_ROLES` list (speed, RPM, throttle, brake, gear, steering) that the
+session actually has a channel for — skipping roles with no match rather than
+leaving a blank dock. Each role is itself a candidate-name list checked in order,
+since the same channel is named differently per format (`"Ground Speed"` in MoTeC,
+`"Speed"` in IBT, `"Speed_kmh"` in `shtep`; `"RPM"` vs `"Engine0_RPM"`, etc.) — this
+can't be a single flat name list the way `KeyChannelMap::distance`'s lookup is,
+since here *multiple* different roles each need their own resolved name. Falls back
+to `pick_default_channel`'s old single-channel behavior (as one dock) only if *none*
+of the roles match anything, so an unfamiliar channel naming scheme still doesn't
+start from a blank canvas. `main.rs`'s `load_file` swaps this in for the old
+single-channel default; no other worksheet/dock plumbing changed, since
+`default_dock_channels` returns exactly the `Vec<Vec<String>>` shape
+`AppState.dock_channels` already expects.
+
 ## Open validation tasks (do before/while coding)
 
 - [x] Read `ldparser`'s actual `struct.unpack` format strings for the real field
@@ -915,3 +1324,10 @@ Also worth recording from the same investigation, none of it implemented yet:
 - [ ] Decide where the `.lsp` setup parser lives (`sde-formats::rbr`) and whether
       to read the setup from the standalone file or the copy embedded in the
       `.rpl` — the latter is self-describing and can't drift from the run.
+- [ ] **Discrete-channel indicators (2026-07-27, scoped, not started):** source
+      iRacing's official `irsdk_defines.h` (from the iRacing SDK download — not
+      currently a local reference repo) for the real `irsdk_TrkLoc`/`irsdk_TrkSurf`/
+      `irsdk_TrackWetness` enum tables before writing the `sde-core` label-mapping
+      layer described in milestone 5 above. Neither of this project's two iRacing
+      reference repos (`TrackDataAnalysis/data/iracing.py`, `../iracing-telemetry-
+      tool`) define these enums — both only pass the numeric values through.

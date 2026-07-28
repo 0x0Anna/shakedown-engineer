@@ -164,6 +164,82 @@ pub fn build_plot(
     })
 }
 
+/// Which quantity a dock's graphs use for the horizontal axis. See the
+/// "UI/UX direction: telemetry dashboard, reimagined" design note in
+/// PROJECT_PLAN.md (principle 3): distance is the primary axis for
+/// rally/hillclimb content — stage position is comparable across runs
+/// even when pace (and therefore elapsed time at a given point) differs,
+/// unlike time. Lap/zoom *selection* stays entirely time-based
+/// (unchanged); only the plotted x-coordinate and cursor-position lookup
+/// change.
+///
+/// `Distance` silently behaves like `Time` whenever no distance channel
+/// is available (see `sde_core::KeyChannelMap::distance`) — callers don't
+/// need to branch on availability themselves, see
+/// [`build_lap_comparison_plot`].
+///
+/// One known limitation: a distance channel like iRacing's `LapDist`
+/// resets to `0` at each lap start, so it's only monotonic *within* one
+/// lap. This is exactly the shape [`build_lap_comparison_plot`] already
+/// slices data into (one range per lap, each rebased independently), so
+/// per-lap and per-comparison views are unaffected — the one case that
+/// doesn't work is a single "All" range spanning *multiple* laps, where
+/// the distance axis would sawtooth. Not guarded against here; out of
+/// scope for the rally/hillclimb single-stage content this was built for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AxisMode {
+    #[default]
+    Time,
+    Distance,
+}
+
+/// The shared distance-axis span for a set of `(start_ms, end_ms)` time
+/// ranges, analogous to [`shared_duration`] for the time axis: the
+/// largest `distance_channel` delta across any one range, so the range
+/// covering the most ground fills the full plot width. Always at least
+/// [`f64::EPSILON`]`, so it's safe to divide by directly.
+///
+/// A range whose start/end both fall outside `distance_channel`'s data
+/// contributes nothing (silently skipped, matching [`windowed_samples`]'s
+/// "no overlap" handling elsewhere in this module).
+#[must_use]
+pub fn distance_axis_span(distance_channel: &Channel, ranges: &[(f64, f64)]) -> f64 {
+    ranges
+        .iter()
+        .filter_map(|&(start, end)| {
+            let d0 = value_at(distance_channel, start)?;
+            let d1 = value_at(distance_channel, end)?;
+            Some((d1 - d0).max(0.0))
+        })
+        .fold(0.0_f64, f64::max)
+        .max(f64::EPSILON)
+}
+
+/// Inverse of [`value_at`] for a distance channel, restricted to one
+/// `[start, end]` time range (typically one lap): the time within that
+/// range at which `distance_channel` reaches `target_distance`. Windows
+/// to `[start, end]` first (via [`windowed_samples`]) rather than
+/// searching the whole channel, because a channel like iRacing's
+/// `LapDist` resets to `0` at every lap start and so is only monotonic
+/// *within* one lap — searching the unwindowed channel would feed
+/// [`value_at_raw`]'s bracket search a non-sorted array and silently
+/// return a bracket from the wrong lap. Returns `None` if `distance_channel`
+/// has no samples overlapping `[start, end]`.
+#[must_use]
+pub fn time_at_distance(
+    distance_channel: &Channel,
+    start: f64,
+    end: f64,
+    target_distance: f64,
+) -> Option<f64> {
+    let samples = windowed_samples(distance_channel, start, end);
+    if samples.is_empty() {
+        return None;
+    }
+    let (timecodes, values): (Vec<f64>, Vec<f64>) = samples.into_iter().unzip();
+    value_at_raw(&values, &timecodes, true, target_distance)
+}
+
 /// One overlaid trace within a [`MultiPlotData`] — a single lap's slice of
 /// a channel, rebased so it starts at `t = 0`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +412,11 @@ pub fn apply_zoom(ranges: &[(f64, f64)], zoom: Option<(f64, f64)>) -> (Vec<(f64,
 /// from `series` (e.g. a lap the channel wasn't recording during).
 /// Returns `None` if `ranges` is empty or every range excludes all of
 /// the channel's samples.
+///
+/// `axis`/`distance_channel` select the horizontal axis — see
+/// [`AxisMode`]. Passing `AxisMode::Distance` with `distance_channel:
+/// None` behaves exactly like `AxisMode::Time` (transparent fallback);
+/// callers don't need to check availability themselves.
 #[must_use]
 pub fn build_lap_comparison_plot(
     channel: &Channel,
@@ -343,18 +424,31 @@ pub fn build_lap_comparison_plot(
     view_height: f64,
     ranges: &[(f64, f64)],
     time_span: f64,
+    axis: AxisMode,
+    distance_channel: Option<&Channel>,
 ) -> Option<MultiPlotData> {
     if ranges.is_empty() {
         return None;
     }
 
+    let distance_channel = match axis {
+        AxisMode::Distance => distance_channel,
+        AxisMode::Time => None,
+    };
+
     let per_range_samples: Vec<Vec<(f64, f64)>> = ranges
         .iter()
         .map(|&(start, end)| {
-            windowed_samples(channel, start, end)
-                .into_iter()
-                .map(|(t, v)| (t - start, v))
-                .collect()
+            let raw = windowed_samples(channel, start, end);
+            match distance_channel {
+                Some(dist_ch) => {
+                    let start_dist = value_at(dist_ch, start).unwrap_or(0.0);
+                    raw.into_iter()
+                        .filter_map(|(t, v)| value_at(dist_ch, t).map(|d| (d - start_dist, v)))
+                        .collect()
+                }
+                None => raw.into_iter().map(|(t, v)| (t - start, v)).collect(),
+            }
         })
         .collect();
 
@@ -362,7 +456,10 @@ pub fn build_lap_comparison_plot(
         return None;
     }
 
-    let time_span = time_span.max(f64::EPSILON);
+    let axis_span = match distance_channel {
+        Some(dist_ch) => distance_axis_span(dist_ch, ranges),
+        None => time_span.max(f64::EPSILON),
+    };
     let (raw_min, raw_max) = per_range_samples
         .iter()
         .flatten()
@@ -377,7 +474,7 @@ pub fn build_lap_comparison_plot(
         .map(|samples| {
             let mut commands = String::new();
             for (i, &(t, v)) in samples.iter().enumerate() {
-                let x = t / time_span * view_width;
+                let x = t / axis_span * view_width;
                 let y = view_height - (v - min_val) / val_span * view_height;
                 let _ = if i == 0 {
                     write!(commands, "M {x} {y} ")
@@ -467,6 +564,55 @@ pub fn pick_default_channel(session: &sde_core::Session) -> Option<&Channel> {
         .or_else(|| names.first().and_then(|n| session.channels.get(*n)))
 }
 
+/// Candidate names for each "role" in the default worksheet, checked in
+/// order, one list per role — the same channel means different things by
+/// name across formats (e.g. speed is `"Ground Speed"` in MoTeC,
+/// `"Speed"` in IBT, `"Speed_kmh"` in `shtep`), so this can't be a single
+/// flat name list the way [`sde_core::KeyChannelMap`]'s `distance` lookup
+/// is. One dock is created per role that has *any* match in the loaded
+/// session; a role with no match is simply skipped, not left as an empty
+/// dock. Order here is the on-screen order, top to bottom.
+const DEFAULT_DOCK_ROLES: &[&[&str]] = &[
+    &["Ground Speed", "Speed", "Speed_kmh"],
+    &["RPM", "Engine0_RPM"],
+    &["Throttle", "THROTTLE", "Throttle_pct", "ThrottleRaw"],
+    &["Brake", "BRAKE", "Brake_pct", "BrakeRaw"],
+    &["Gear", "GEAR"],
+    &["SteeringWheelAngle", "STEERANGLE", "SteerAngle_deg"],
+];
+
+/// A sensible default worksheet for a freshly loaded session — one dock
+/// per [`DEFAULT_DOCK_ROLES`] entry the session actually has a channel
+/// for — rather than starting from either a single bare channel or a
+/// fully empty worksheet. Matches the "glance-able default view" every
+/// established telemetry tool (MoTeC i2, Pi Toolbox) opens with, instead
+/// of making every session start from a blank canvas.
+///
+/// Falls back to [`pick_default_channel`]'s single-channel pick (as one
+/// dock) if *none* of the roles match anything — an unfamiliar channel
+/// naming scheme shouldn't leave the worksheet empty either.
+#[must_use]
+pub fn default_dock_channels(session: &sde_core::Session) -> Vec<Vec<String>> {
+    let docks: Vec<Vec<String>> = DEFAULT_DOCK_ROLES
+        .iter()
+        .filter_map(|candidates| {
+            candidates
+                .iter()
+                .find(|name| session.channels.contains_key(**name))
+                .map(|name| vec![(*name).to_string()])
+        })
+        .collect();
+
+    if docks.is_empty() {
+        pick_default_channel(session)
+            .into_iter()
+            .map(|c| vec![c.name.clone()])
+            .collect()
+    } else {
+        docks
+    }
+}
+
 /// All channel names in `session`, sorted alphabetically — the unfiltered
 /// list backing the channel search/picker.
 #[must_use]
@@ -488,12 +634,27 @@ pub fn filter_channel_names(names: &[String], query: &str) -> Vec<String> {
         .collect()
 }
 
-/// Display labels for the lap picker: `"All"` (the whole session, index
-/// `0`) followed by one label per lap in session order (index `lap_num +
-/// 1`), so `lap_labels(session)[i]` and `session.laps[i - 1]` always
-/// correspond for `i >= 1`.
+/// Display labels for the lap/run picker: `"All"` (the whole session,
+/// index `0`) followed by one label per lap in session order (index
+/// `lap_num + 1`), so `lap_labels(session)[i]` and `session.laps[i - 1]`
+/// always correspond for `i >= 1`.
+///
+/// A session with exactly one lap — a single continuous stage/hillclimb
+/// run, not a lap-timed circuit (see PROJECT_PLAN.md's "UI/UX direction"
+/// design note, principle 4: "Run", not "Lap", as the primary unit) —
+/// gets one label, `"Full Run (…s)"`, instead of the redundant `["All",
+/// "Lap 1 (…s)"]` pair a lap-assuming picker would show for the exact
+/// same range twice. `index 0` still means "the whole session" either
+/// way, so callers indexing into `session.laps` (`i - 1` for `i >= 1`)
+/// need no special-casing — a single-lap session's index `0` already
+/// spans that one lap.
 #[must_use]
 pub fn lap_labels(session: &sde_core::Session) -> Vec<String> {
+    if let [lap] = session.laps.as_slice() {
+        let dur_s = (lap.end_time - lap.start_time) / 1000.0;
+        return vec![format!("Full Run ({dur_s:.1}s)")];
+    }
+
     let mut labels = vec!["All".to_string()];
     labels.extend(session.laps.iter().map(|lap| {
         let dur_s = (lap.end_time - lap.start_time) / 1000.0;
@@ -714,6 +875,28 @@ mod tests {
     }
 
     #[test]
+    fn lap_labels_single_lap_session_is_full_run_not_all_plus_lap_one() {
+        // A single continuous stage/hillclimb run (e.g. RBR/RSF, iRacing
+        // hillclimb) has exactly one "lap" spanning the whole session —
+        // showing both "All" and "Lap 1" for the identical range would be
+        // redundant and assumes a lap-timed circuit that isn't there.
+        let session = sde_core::Session {
+            channels: std::collections::HashMap::new(),
+            laps: vec![sde_core::Lap {
+                num: 0,
+                start_time: 0.0,
+                end_time: 466_000.0,
+            }],
+            metadata: std::collections::HashMap::new(),
+            key_channel_map: sde_core::KeyChannelMap::default(),
+            file_name: "test".into(),
+            time_penalties: Vec::new(),
+        };
+        let labels = lap_labels(&session);
+        assert_eq!(labels, vec!["Full Run (466.0s)"]);
+    }
+
+    #[test]
     fn session_time_range_is_zero_to_last_lap_end() {
         let session = sde_core::Session {
             channels: std::collections::HashMap::new(),
@@ -868,7 +1051,8 @@ mod tests {
         };
         let ranges = [(0.0, 10.0), (20.0, 30.0)];
         let span = shared_duration(&ranges);
-        let plot = build_lap_comparison_plot(&c, 100.0, 100.0, &ranges, span).unwrap();
+        let plot = build_lap_comparison_plot(&c, 100.0, 100.0, &ranges, span, AxisMode::Time, None)
+            .unwrap();
         assert_eq!(plot.series.len(), 2);
         assert_eq!(plot.series[0].commands, plot.series[1].commands);
     }
@@ -879,7 +1063,8 @@ mod tests {
         // Second range (1000..2000) is well past the channel's data.
         let ranges = [(0.0, 30.0), (1000.0, 2000.0)];
         let span = shared_duration(&ranges);
-        let plot = build_lap_comparison_plot(&c, 100.0, 100.0, &ranges, span).unwrap();
+        let plot = build_lap_comparison_plot(&c, 100.0, 100.0, &ranges, span, AxisMode::Time, None)
+            .unwrap();
         assert_eq!(plot.series.len(), 1);
     }
 
@@ -888,13 +1073,101 @@ mod tests {
         let c = channel(true);
         let ranges = [(1000.0, 2000.0)];
         let span = shared_duration(&ranges);
-        assert!(build_lap_comparison_plot(&c, 100.0, 100.0, &ranges, span).is_none());
+        assert!(
+            build_lap_comparison_plot(&c, 100.0, 100.0, &ranges, span, AxisMode::Time, None)
+                .is_none()
+        );
     }
 
     #[test]
     fn comparison_plot_none_for_empty_ranges() {
         let c = channel(true);
-        assert!(build_lap_comparison_plot(&c, 100.0, 100.0, &[], 1.0).is_none());
+        assert!(
+            build_lap_comparison_plot(&c, 100.0, 100.0, &[], 1.0, AxisMode::Time, None).is_none()
+        );
+    }
+
+    /// A distance channel resembling iRacing's `LapDist`: resets to `0` at
+    /// t=0 and t=20 (two lap starts), climbing to 100 within each lap.
+    fn distance_channel() -> Channel {
+        Channel {
+            name: "LapDist".into(),
+            units: "m".into(),
+            dec_pts: 1,
+            interpolate: true,
+            timecodes: vec![0.0, 10.0, 20.0, 30.0],
+            values: vec![0.0, 100.0, 0.0, 100.0],
+        }
+    }
+
+    #[test]
+    fn distance_axis_span_is_the_largest_per_range_delta() {
+        let dist = distance_channel();
+        // First range covers half a lap's worth of distance (0..50 at
+        // t=5), second covers a full lap's worth (0..100).
+        let span = distance_axis_span(&dist, &[(0.0, 5.0), (20.0, 30.0)]);
+        assert_eq!(span, 100.0);
+    }
+
+    #[test]
+    fn time_at_distance_inverts_value_at_within_the_given_range() {
+        let dist = distance_channel();
+        // Within the first lap (0..10, distance 0..100), distance 50
+        // should map back to t=5 (halfway).
+        assert_eq!(time_at_distance(&dist, 0.0, 10.0, 50.0), Some(5.0));
+        assert_eq!(time_at_distance(&dist, 0.0, 10.0, 0.0), Some(0.0));
+    }
+
+    #[test]
+    fn time_at_distance_stays_within_its_own_lap_despite_the_reset() {
+        // Same distance (50) but looked up within the *second* lap's
+        // window (20..30) should map to that lap's own t=25, not get
+        // confused by the first lap's identical distance value at t=5 —
+        // the whole reason this function windows to `[start, end]` first
+        // instead of searching the unwindowed (non-monotonic) channel.
+        let dist = distance_channel();
+        assert_eq!(time_at_distance(&dist, 20.0, 30.0, 50.0), Some(25.0));
+    }
+
+    #[test]
+    fn comparison_plot_distance_axis_rebases_each_range_to_zero_distance() {
+        let dist = distance_channel();
+        // Channel value climbs 1.0 -> 8.0 across the first lap's samples;
+        // plot it against distance instead of time.
+        let c = Channel {
+            name: "Test".into(),
+            units: "u".into(),
+            dec_pts: 2,
+            interpolate: true,
+            timecodes: vec![0.0, 5.0, 10.0],
+            values: vec![1.0, 2.0, 4.0],
+        };
+        let ranges = [(0.0, 10.0)];
+        let plot = build_lap_comparison_plot(
+            &c,
+            100.0,
+            100.0,
+            &ranges,
+            10.0,
+            AxisMode::Distance,
+            Some(&dist),
+        )
+        .unwrap();
+        assert_eq!(plot.series.len(), 1);
+        // t=0 (distance 0) should plot at x=0; the trace should reach the
+        // full view width by the last sample (distance 100, the axis span).
+        assert!(plot.series[0].commands.starts_with("M 0 "));
+    }
+
+    #[test]
+    fn comparison_plot_distance_axis_falls_back_to_time_when_channel_missing() {
+        let c = channel(true);
+        let ranges = [(0.0, 30.0)];
+        let with_distance =
+            build_lap_comparison_plot(&c, 100.0, 100.0, &ranges, 30.0, AxisMode::Distance, None);
+        let time_mode =
+            build_lap_comparison_plot(&c, 100.0, 100.0, &ranges, 30.0, AxisMode::Time, None);
+        assert_eq!(with_distance, time_mode);
     }
 
     #[test]
@@ -973,6 +1246,55 @@ mod tests {
         let session = session_with(vec![a, b]);
         let picked = pick_default_channel(&session).expect("has channels");
         assert_eq!(picked.name, "B");
+    }
+
+    fn stub_channel(name: &str) -> Channel {
+        Channel {
+            name: name.to_string(),
+            units: String::new(),
+            dec_pts: 0,
+            interpolate: true,
+            timecodes: vec![0.0],
+            values: vec![0.0],
+        }
+    }
+
+    #[test]
+    fn default_dock_channels_picks_one_match_per_role_ibt_style_names() {
+        // IBT-shaped session: "Speed" not "Ground Speed", "Engine0_RPM"
+        // not "RPM", no steering channel present at all.
+        let session = session_with(vec![
+            stub_channel("Speed"),
+            stub_channel("Engine0_RPM"),
+            stub_channel("Throttle"),
+            stub_channel("BrakeRaw"),
+            stub_channel("Gear"),
+            stub_channel("SomeUnrelatedChannel"),
+        ]);
+        let docks = default_dock_channels(&session);
+        assert_eq!(
+            docks,
+            vec![
+                vec!["Speed".to_string()],
+                vec!["Engine0_RPM".to_string()],
+                vec!["Throttle".to_string()],
+                vec!["BrakeRaw".to_string()],
+                vec!["Gear".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn default_dock_channels_falls_back_to_pick_default_channel_when_no_role_matches() {
+        let session = session_with(vec![stub_channel("SomeWeirdChannel")]);
+        let docks = default_dock_channels(&session);
+        assert_eq!(docks, vec![vec!["SomeWeirdChannel".to_string()]]);
+    }
+
+    #[test]
+    fn default_dock_channels_empty_for_a_session_with_no_channels_at_all() {
+        let session = session_with(vec![]);
+        assert!(default_dock_channels(&session).is_empty());
     }
 
     /// End-to-end sanity check against the real synthetic fixture used by

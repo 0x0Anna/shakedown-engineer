@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "sim": "rbr",
+  "sessionType": "stage",
+  "context": "Maantie 1",
+  "car": "Ford Escort MkII",
+  "driver": "Annalise",
+  "startTimeUtc": "2026-07-27T14:32:05Z",
+  "endTimeUtc": "2026-07-27T14:32:05.030Z",
+  "sampleRateHz": 100,
+  "channels": ["Paused", "Discontinuity", "Speed_kmh", "RPM", "Gear", "Throttle_pct", "LapDistance_m"],
+  "pluginVersion": "0.1.0"
+}

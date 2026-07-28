@@ -186,7 +186,7 @@ export component AppWindow inherits Window {
 
     // -- state provided by Rust --
     in property <string> window-title: "sde-app — No file loaded";
-    in property <string> status-text: "Open a MoTeC .ld file to begin.";
+    in property <string> status-text: "Open a .ld or .ibt telemetry log to begin.";
     in property <bool> cursor-visible: false;
     in property <float> cursor-fraction: 0; // 0..1 across the plotted x range
     in property <string> cursor-time-text: "";
@@ -209,6 +209,8 @@ export component AppWindow inherits Window {
     in property <[string]> math-channel-names: []; // created math channels, for removal chips
     in property <string> zoom-range-text: ""; // e.g. "12.0s - 48.0s of 120.7s"; "" when fully zoomed out
     in-out property <int> layout-mode: 0; // 0 = stacked, 1 = side-by-side, 2 = grid; pure UI state
+    in property <string> axis-mode-label: "Time"; // "Time" or "Distance"
+    in property <bool> axis-distance-available: false; // whether the loaded session has a distance channel
 
     // -- callbacks into Rust --
     callback open-file();
@@ -226,6 +228,7 @@ export component AppWindow inherits Window {
     callback math-channel-removed(int); // index into math-channel-names
     callback zoom-scrolled(float, float, float); // delta-x, delta-y, cursor fraction
     callback zoom-reset();
+    callback axis-mode-toggled(); // flips between Time and Distance
 
     VerticalBox {
         padding: 10px;
@@ -235,7 +238,7 @@ export component AppWindow inherits Window {
             padding: 0px;
             spacing: 8px;
             Button {
-                text: "Open .ld file...";
+                text: "Open file...";
                 clicked => { root.open-file(); }
             }
             Text {
@@ -245,7 +248,11 @@ export component AppWindow inherits Window {
             }
             Rectangle { horizontal-stretch: 1; }
             Text {
-                text: "Lap:";
+                // A single-lap session is a continuous stage/hillclimb
+                // run, not a lap-timed circuit (see `graph::lap_labels`'s
+                // "Full Run" label for that case) — "Lap:" would be a
+                // misleading prefix for its one dropdown entry.
+                text: root.lap-labels.length == 1 ? "Run:" : "Lap:";
                 vertical-alignment: center;
             }
             // Whenever the compare chips (below) have any lap selected,
@@ -382,6 +389,36 @@ export component AppWindow inherits Window {
                         width: 100%;
                         height: 100%;
                     }
+                }
+            }
+
+            Text {
+                text: "Axis:";
+                vertical-alignment: center;
+            }
+            // Distance mode falls back to time silently when unavailable
+            // (see `graph::build_lap_comparison_plot`), but a disabled-
+            // looking toggle communicates *why* nothing changed rather
+            // than leaving it looking broken.
+            Rectangle {
+                width: 90px;
+                height: 24px;
+                background: !root.axis-distance-available
+                    ? #2a2f3a
+                    : (root.axis-mode-label == "Distance" ? #4ea1ff : #2a2f3a);
+                opacity: root.axis-distance-available ? 1.0 : 0.5;
+                border-radius: 3px;
+                TouchArea {
+                    enabled: root.axis-distance-available;
+                    clicked => { root.axis-mode-toggled(); }
+                }
+                Text {
+                    text: root.axis-mode-label;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
                 }
             }
 
@@ -619,7 +656,10 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: root.cursor-visible ? "t = " + root.cursor-time-text + " ms" : "";
+                    // Fully formatted in Rust (includes the "t = "/"d = "
+                    // prefix and unit), since which is shown depends on
+                    // `axis-mode-label`.
+                    text: root.cursor-visible ? root.cursor-time-text : "";
                 }
             }
         }

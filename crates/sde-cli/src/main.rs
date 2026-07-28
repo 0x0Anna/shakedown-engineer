@@ -1,8 +1,8 @@
-//! `dump_channels` — minimal CLI proving the sde-motec parser -> sde-core
+//! `dump_channels` — minimal CLI proving the sde-formats parsers -> sde-core
 //! `Session` data-model boundary works, ahead of any GUI (milestone 2's
 //! goal per PROJECT_PLAN.md).
 //!
-//! Usage: `dump_channels <path-to-file.ld>`
+//! Usage: `dump_channels <path-to-file.ld|.ibt>`
 
 // `doc_markdown`: fires on the plain-English `PROJECT_PLAN.md` mention
 // above; not worth backtick-wrapping for a doc-only lint.
@@ -21,12 +21,21 @@ fn main() -> ExitCode {
     let path = match args.next() {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("usage: dump_channels <path-to-file.ld>");
+            eprintln!("usage: dump_channels <path-to-file.ld|.ibt>");
             return ExitCode::FAILURE;
         }
     };
 
-    let session = match sde_core::Session::load_motec(&path) {
+    let is_ibt = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ibt"));
+
+    let session = if is_ibt {
+        sde_core::Session::load_ibt(&path).map_err(|e| e.to_string())
+    } else {
+        sde_core::Session::load_motec(&path).map_err(|e| e.to_string())
+    };
+    let session = match session {
         Ok(s) => s,
         Err(e) => {
             eprintln!("failed to load {}: {e}", path.display());

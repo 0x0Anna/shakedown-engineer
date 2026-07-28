@@ -1,0 +1,11 @@
+[package]
+name = "sde-shtep"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Parser for the SimHub TSV telemetry export format (shtep companion plugin; part of the sde-formats workspace)"
+
+[dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

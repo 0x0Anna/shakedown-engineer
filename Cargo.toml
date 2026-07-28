@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/sde-formats/motec",
     "crates/sde-formats/rbr",
+    "crates/sde-formats/ibt",
+    "crates/sde-formats/shtep",
     "crates/sde-core",
     "crates/sde-cli",
     "crates/sde-app",
