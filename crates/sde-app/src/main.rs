@@ -106,6 +106,10 @@ struct AppState {
     /// keeps the whole gesture on one axis the way a trackpad user
     /// expects.
     scroll_gesture: Option<(graph::ScrollAxis, std::time::Instant)>,
+    /// Time (default) or distance x-axis — see `graph::AxisMode`. Reset to
+    /// `Time` on every file load; toggled independently of lap
+    /// selection/zoom, both of which stay time-based regardless.
+    axis_mode: graph::AxisMode,
     plotted: HashMap<String, PlottedChannel>,
     /// Bumped every time `session.channels`' contents change (a new
     /// session loads, or a math channel is added/redefined/removed).
@@ -404,6 +408,25 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let window_weak = window.as_weak();
         let state = state.clone();
+        window.on_axis_mode_toggled(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            {
+                let mut state_mut = state.borrow_mut();
+                state_mut.axis_mode = match state_mut.axis_mode {
+                    graph::AxisMode::Time => graph::AxisMode::Distance,
+                    graph::AxisMode::Distance => graph::AxisMode::Time,
+                };
+            }
+            refresh_axis_ui(&window, &state);
+            replot(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
         window.on_math_channel_add_requested(move |name, formula| {
             let Some(window) = window_weak.upgrade() else {
                 return;
@@ -517,17 +540,37 @@ fn main() -> Result<(), slint::PlatformError> {
             if ranges.is_empty() {
                 return;
             }
-            let t_rel = f64::from(fraction) * time_span;
+
+            let distance_channel = session
+                .key_channel_map
+                .distance
+                .as_deref()
+                .and_then(|name| session.channels.get(name));
+            let abs_times = cursor_abs_times(
+                &ranges,
+                time_span,
+                f64::from(fraction),
+                state.axis_mode,
+                distance_channel,
+            );
 
             let cursor_values: Vec<slint::SharedString> = state
                 .dock_channels
                 .iter()
-                .map(|group| cursor_text_for_group(&state, group, &ranges, t_rel).into())
+                .map(|group| cursor_text_for_group(&state, group, &abs_times).into())
                 .collect();
+
+            let readout = match (state.axis_mode, distance_channel) {
+                (graph::AxisMode::Distance, Some(dist_ch)) => {
+                    let axis_span = graph::distance_axis_span(dist_ch, &ranges);
+                    format!("d = {:.1} m", f64::from(fraction) * axis_span)
+                }
+                _ => format!("t = {:.1} ms", f64::from(fraction) * time_span),
+            };
 
             window.set_cursor_visible(true);
             window.set_cursor_fraction(fraction);
-            window.set_cursor_time_text(format!("{t_rel:.1}").into());
+            window.set_cursor_time_text(readout.into());
             window.set_cursor_values(slint::ModelRc::new(slint::VecModel::from(cursor_values)));
         });
     }
@@ -536,25 +579,21 @@ fn main() -> Result<(), slint::PlatformError> {
 }
 
 /// The cursor readout text for one dock: each channel in `group` gets its
-/// pipe-separated per-`ranges` values (`"12.3 | 15.0"` when comparing
-/// laps); a single-channel dock keeps that bare (matching the original
-/// format), while a multi-channel overlay dock prefixes each with its
-/// channel name (`"BRAKE: 80.0   THROTTLE: 0.0"`) so the values stay
-/// identifiable once more than one channel shares the graph.
-fn cursor_text_for_group(
-    state: &AppState,
-    group: &[String],
-    ranges: &[(f64, f64)],
-    t_rel: f64,
-) -> String {
+/// pipe-separated per-range values (`"12.3 | 15.0"` when comparing laps),
+/// one absolute sample time per entry in `abs_times` (parallel to
+/// `ranges`/whatever range list produced them — see [`cursor_abs_times`]);
+/// a single-channel dock keeps that bare (matching the original format),
+/// while a multi-channel overlay dock prefixes each with its channel name
+/// (`"BRAKE: 80.0   THROTTLE: 0.0"`) so the values stay identifiable once
+/// more than one channel shares the graph.
+fn cursor_text_for_group(state: &AppState, group: &[String], abs_times: &[f64]) -> String {
     let parts: Vec<String> = group
         .iter()
         .map(|name| {
             let values = state.plotted.get(name).map_or_else(String::new, |c| {
-                ranges
+                abs_times
                     .iter()
-                    .filter_map(|&(start, end)| {
-                        let abs_t = (start + t_rel).min(end);
+                    .filter_map(|&abs_t| {
                         graph::value_at_raw(&c.timecodes, &c.values, c.interpolate, abs_t)
                             .map(|v| format!("{v:.3}"))
                     })
@@ -574,6 +613,48 @@ fn cursor_text_for_group(
         })
         .collect();
     parts.join("   ")
+}
+
+/// The absolute sample time (one per entry in `ranges`) the cursor
+/// currently points at, for a cursor drag at `fraction` (0..1 across the
+/// dock's plotted width). In `Time` mode this is the same offset
+/// (`fraction * time_span`) applied to every range, since the x-axis is
+/// linear in time; in `Distance` mode each range gets its own absolute
+/// time, found by inverting `distance_channel` (see
+/// `graph::time_at_distance`) — necessary because two compared runs at
+/// the same distance along the stage generally aren't at the same
+/// elapsed time, which is the entire point of a distance-based
+/// comparison. Falls back to `Time`-mode behavior (and `None` for a range
+/// distance lookup fails) whenever no distance channel is available,
+/// matching `build_lap_comparison_plot`'s own fallback.
+fn cursor_abs_times(
+    ranges: &[(f64, f64)],
+    time_span: f64,
+    fraction: f64,
+    axis_mode: graph::AxisMode,
+    distance_channel: Option<&sde_core::Channel>,
+) -> Vec<f64> {
+    match (axis_mode, distance_channel) {
+        (graph::AxisMode::Distance, Some(dist_ch)) => {
+            let axis_span = graph::distance_axis_span(dist_ch, ranges);
+            ranges
+                .iter()
+                .filter_map(|&(start, end)| {
+                    let start_dist = graph::value_at(dist_ch, start)?;
+                    let target_dist = start_dist + fraction * axis_span;
+                    let abs_t = graph::time_at_distance(dist_ch, start, end, target_dist)?;
+                    Some(abs_t.clamp(start, end))
+                })
+                .collect()
+        }
+        _ => {
+            let t_rel = fraction * time_span;
+            ranges
+                .iter()
+                .map(|&(start, end)| (start + t_rel).min(end))
+                .collect()
+        }
+    }
 }
 
 /// Turn a `Vec<String>` into the `ModelRc<SharedString>` Slint's
@@ -710,6 +791,30 @@ fn refresh_zoom_ui(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     window.set_zoom_range_text(format!("{start_s:.1}s - {end_s:.1}s of {full_span_s:.1}s").into());
 }
 
+/// Push the current axis-mode label/availability into the window. Called
+/// after loading a file and whenever the axis toggle is clicked.
+///
+/// `axis-distance-available` drives `app.slint`'s toggle: distance mode
+/// can be selected regardless (falls back to time transparently — see
+/// `graph::build_lap_comparison_plot`), but greying out an unavailable
+/// toggle communicates *why* the axis didn't visibly change, rather than
+/// silently doing nothing.
+fn refresh_axis_ui(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
+    let state = state.borrow();
+    let distance_available = state
+        .session
+        .as_ref()
+        .is_some_and(|s| s.key_channel_map.distance.is_some());
+    window.set_axis_mode_label(
+        match state.axis_mode {
+            graph::AxisMode::Time => "Time",
+            graph::AxisMode::Distance => "Distance",
+        }
+        .into(),
+    );
+    window.set_axis_distance_available(distance_available);
+}
+
 fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
     let file_name = path.file_name().map_or_else(
         || path.to_string_lossy().to_string(),
@@ -739,6 +844,8 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
             window.set_math_name_text(String::new().into());
             window.set_math_formula_text(String::new().into());
             window.set_zoom_range_text(String::new().into());
+            window.set_axis_mode_label("Time".into());
+            window.set_axis_distance_available(false);
             return;
         }
     };
@@ -759,6 +866,7 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
         state.compare_lap_indices.clear();
         state.math_channel_names.clear();
         state.zoom = None;
+        state.axis_mode = graph::AxisMode::Time;
         state.session_generation += 1;
     }
 
@@ -778,6 +886,7 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
     refresh_channel_list(window, state);
     refresh_compare_ui(window, state);
     refresh_zoom_ui(window, state);
+    refresh_axis_ui(window, state);
     replot(window, state);
 }
 
@@ -809,6 +918,12 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
         window.set_cursor_visible(false);
         return;
     }
+
+    let distance_channel = session
+        .key_channel_map
+        .distance
+        .as_deref()
+        .and_then(|name| session.channels.get(name));
 
     // `plotted` only depends on `session.channels` and `dock_channels`
     // (which channels are plotted), not on `ranges`/`time_span` (the
@@ -859,6 +974,8 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
                 VIEW_HEIGHT,
                 &ranges,
                 time_span,
+                state.axis_mode,
+                distance_channel,
             ) {
                 any_data = true;
                 // Only label traces when the dock overlays more than one

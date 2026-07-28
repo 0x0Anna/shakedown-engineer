@@ -18,6 +18,7 @@ use std::path::Path;
 
 pub mod mathexpr;
 
+pub use sde_ibt::IbtError;
 pub use sde_motec::{LdError, TimePenalty};
 
 /// A single telemetry channel. Field names mirror TDA's `Channel`
@@ -52,6 +53,19 @@ impl From<sde_motec::LdChannel> for Channel {
     }
 }
 
+impl From<sde_ibt::IbtChannel> for Channel {
+    fn from(c: sde_ibt::IbtChannel) -> Self {
+        Self {
+            name: c.name,
+            units: c.unit,
+            dec_pts: c.dec_pts,
+            interpolate: c.interpolate,
+            timecodes: c.timecodes,
+            values: c.values,
+        }
+    }
+}
+
 /// A lap within the session, in milliseconds from the start of the log.
 /// Mirrors TDA's `Lap` dataclass.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,6 +83,32 @@ pub struct KeyChannelMap {
     pub lat: Option<String>,
     pub long: Option<String>,
     pub alt: Option<String>,
+    /// A monotonically-increasing-within-a-lap distance channel (e.g.
+    /// iRacing's `LapDist`, meters from the current lap/stage start), if
+    /// present — see [`DISTANCE_CHANNEL_NAMES`]. Backs `sde-app`'s
+    /// distance x-axis mode (PROJECT_PLAN.md's "UI/UX direction" design
+    /// note, principle 3).
+    pub distance: Option<String>,
+}
+
+/// Channel names observed to carry a lap/stage-relative distance signal
+/// across different exporters, checked in order. iRacing's IBT format
+/// exposes `LapDist` directly (meters, resets to 0 each lap — see
+/// `sde_ibt`'s findings in PROJECT_PLAN.md); `"Distance"` is the more
+/// generic name real MoTeC hardware/software tends to use. Neither
+/// project's MoTeC reference oracle (`TrackDataAnalysis`) special-cases a
+/// distance channel by name the way it does `Beacon`, so this list is a
+/// best-effort guess pending a confirmed real-hardware example — same
+/// caveat as [`BEACON_CHANNEL_NAMES`]'s ACC-only validation.
+const DISTANCE_CHANNEL_NAMES: &[&str] = &["LapDist", "Distance"];
+
+/// Look up the first name from [`DISTANCE_CHANNEL_NAMES`] present in
+/// `channels`, shared by every format's `Session` loader.
+fn find_distance_channel(channels: &HashMap<String, Channel>) -> Option<String> {
+    DISTANCE_CHANNEL_NAMES
+        .iter()
+        .find(|name| channels.contains_key(**name))
+        .map(|name| (*name).to_string())
 }
 
 /// A parsed telemetry session. Mirrors TDA's `LogFile` dataclass:
@@ -113,6 +153,58 @@ impl Session {
         Self::from_ld_file_and_ldx(ld_file, None)
     }
 
+    /// Load a session from an iRacing `.ibt` file on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns any [`IbtError`] that `sde_ibt::parse` returns — i.e. if
+    /// the file can't be read, or isn't a well-formed `.ibt` file.
+    pub fn load_ibt(path: &Path) -> Result<Self, IbtError> {
+        let ibt_file = sde_ibt::parse(path)?;
+        Ok(Self::from_ibt_file(ibt_file))
+    }
+
+    /// Build a `Session` from an already-parsed `sde_ibt::IbtFile`.
+    #[must_use]
+    pub fn from_ibt_file(ibt_file: sde_ibt::IbtFile) -> Self {
+        let channels: HashMap<String, Channel> = ibt_file
+            .channels
+            .into_iter()
+            .map(|c| (c.name.clone(), Channel::from(c)))
+            .collect();
+
+        let key_channel_map = KeyChannelMap {
+            speed: has(&channels, "Speed"),
+            lat: has(&channels, "Lat"),
+            long: has(&channels, "Lon"),
+            alt: has(&channels, "Alt"),
+            distance: find_distance_channel(&channels),
+        };
+
+        let end_time = channels
+            .values()
+            .filter_map(|c| c.timecodes.last().copied())
+            .fold(0.0_f64, f64::max);
+
+        // iRacing exposes an explicit `Lap` channel directly (unlike MoTeC,
+        // which needs the Beacon state machine), so this is normally
+        // available; falls back to treating the whole session as one lap
+        // if `Lap`/`LapDist`/`Speed` aren't all present with sane units.
+        let laps = laps_from_lap_channel(&channels)
+            .unwrap_or_else(|| boundaries_to_laps(&[0.0, end_time]));
+
+        let metadata = build_ibt_metadata(&ibt_file.metadata);
+
+        Self {
+            channels,
+            laps,
+            metadata,
+            key_channel_map,
+            file_name: ibt_file.file_name,
+            time_penalties: Vec::new(),
+        }
+    }
+
     fn from_ld_file_and_ldx(ld_file: sde_motec::LdFile, ldx: Option<sde_motec::LdxFile>) -> Self {
         let channels: HashMap<String, Channel> = ld_file
             .channels
@@ -125,6 +217,7 @@ impl Session {
             lat: has(&channels, "GPS Latitude"),
             long: has(&channels, "GPS Longitude"),
             alt: has(&channels, "Altitude"),
+            distance: find_distance_channel(&channels),
         };
 
         let end_time = channels
@@ -265,6 +358,79 @@ fn boundaries_to_laps(boundaries: &[f64]) -> Vec<Lap> {
             }
         })
         .collect()
+}
+
+/// Derive lap boundaries from iRacing's explicit `Lap` channel, porting
+/// TDA's `data/iracing.py` `_find_laps` almost verbatim.
+///
+/// `LapCurrentLapTime` doesn't reset cleanly right at the lap boundary
+/// (and never reacts at all on an out lap), so instead of trusting the
+/// `Lap` sample's own timecode, the exact crossing instant is
+/// back-computed from `LapDist`/`Speed`: `time_at_lapdist_0 =
+/// speed.timecodes[b] - lapdist[b] / speed[b] * 1000`, clamped to be no
+/// earlier than the previous sample's timecode.
+///
+/// Returns `None` if `Lap`/`LapDist`/`Speed` aren't all present with the
+/// expected units (`m`/`m/s`) and matching sample counts — the caller
+/// falls back to a single whole-session lap in that case.
+fn laps_from_lap_channel(channels: &HashMap<String, Channel>) -> Option<Vec<Lap>> {
+    let lap = channels.get("Lap")?;
+    let lapdist = channels.get("LapDist")?;
+    let speed = channels.get("Speed")?;
+
+    if lapdist.units != "m" || speed.units != "m/s" {
+        return None;
+    }
+    let n = lap.values.len();
+    if n == 0
+        || lapdist.values.len() != n
+        || speed.values.len() != n
+        || speed.timecodes.len() != n
+    {
+        return None;
+    }
+
+    let mut boundaries = vec![0.0_f64];
+    let mut add_end = true;
+
+    for b in 1..n {
+        // Lap numbers are integer-valued floats (cast from an int32
+        // channel), so exact comparison is correct here, not a
+        // missing-epsilon bug — same rationale as `laps_from_beacon`'s
+        // magic-number check.
+        #[allow(clippy::float_cmp)]
+        let lap_changed = lap.values[b] != lap.values[b - 1];
+        if !lap_changed {
+            continue;
+        }
+
+        #[allow(clippy::float_cmp)]
+        let is_reset_to_zero = lap.values[b] == 0.0;
+        if is_reset_to_zero {
+            // Probably no more useful data (e.g. session ended mid-lap).
+            boundaries.push(speed.timecodes[b]);
+            add_end = false;
+            break;
+        }
+
+        let time_at_lapdist_0 = speed.timecodes[b] - lapdist.values[b] / speed.values[b] * 1000.0;
+        boundaries.push(speed.timecodes[b - 1].max(time_at_lapdist_0));
+    }
+
+    if add_end {
+        boundaries.push(*speed.timecodes.last()?);
+    }
+
+    Some(boundaries_to_laps(&boundaries))
+}
+
+fn build_ibt_metadata(m: &sde_ibt::IbtMetadata) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    out.insert("Log Date".into(), m.log_date.clone());
+    out.insert("Log Time".into(), m.log_time.clone());
+    out.insert("Driver".into(), m.driver.clone());
+    out.insert("Venue".into(), m.venue.clone());
+    out
 }
 
 fn build_metadata(m: &sde_motec::LdMetadata) -> HashMap<String, String> {
