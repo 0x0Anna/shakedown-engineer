@@ -186,7 +186,7 @@ export component AppWindow inherits Window {
 
     // -- state provided by Rust --
     in property <string> window-title: "sde-app — No file loaded";
-    in property <string> status-text: "Open a MoTeC .ld file to begin.";
+    in property <string> status-text: "Open a .ld or .ibt telemetry log to begin.";
     in property <bool> cursor-visible: false;
     in property <float> cursor-fraction: 0; // 0..1 across the plotted x range
     in property <string> cursor-time-text: "";
@@ -238,7 +238,7 @@ export component AppWindow inherits Window {
             padding: 0px;
             spacing: 8px;
             Button {
-                text: "Open .ld file...";
+                text: "Open file...";
                 clicked => { root.open-file(); }
             }
             Text {

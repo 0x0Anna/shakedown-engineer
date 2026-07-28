@@ -58,6 +58,9 @@ crates/
 │   ├── adulog/            # ECUMaster
 │   ├── run/                # Race Technology
 │   ├── mlg/                # MegaLogViewer
+│   ├── shtep/              # SimHub TSV export (companion plugin repo `../shtep`) —
+│   │                       #   DONE (`sde-shtep`). No TrackDataAnalysis oracle (bespoke
+│   │                       #   schema, not a port) — `../shtep/SCHEMA.md` is authoritative.
 │   ├── rbr/               # RBR/RSF companion files — STARTED (`sde-rbr`).
 │   │                      #   ini.rs     — shared minimal INI reader
 │   │                      #   replay.rs  — replay metadata .ini sidecar (DONE)
@@ -162,6 +165,13 @@ crates/
     explicit `Lap` variable directly, so milestone 4 shouldn't need a beacon-style
     state machine for iRacing files.
   (Local reference repo: `../iracing-telemetry-tool`)
+- **`shtep` (SimHub Telemetry Export Plugin)** — companion repo, `../shtep`, C#/SimHub
+  PluginSDK. Writes `{base}.tsv` + `{base}.meta.json` sidecar pairs per its own
+  `SCHEMA.md` (v1.1). **Not a port** — this is a bespoke format this project's own
+  companion plugin defines, so `SCHEMA.md` is the authoritative spec directly, no
+  `TrackDataAnalysis` oracle involved. `sde-formats/shtep` implements the Rust-side
+  reader; the plugin repo owns recording only (no `.ld`/`.ibt`/MoTeC knowledge lives
+  there by design). See milestone 4 below for what's implemented.
 
 ### Validation findings (2026-07-20)
 
@@ -398,6 +408,65 @@ Subaru_WRX_STI/*.ibt`) before writing any Rust:
    `laps_from_lap_channel` ports `_find_laps`'s `Lap`/`LapDist`/`Speed`-based
    crossing-time back-computation (analogous to `laps_from_beacon` for MoTeC), and
    `dump_channels` now dispatches on file extension (`.ld` vs `.ibt`).
+   *(IBT lap-splitting bug fix, 2026-07-27):* `sde-app`'s "Open file..." dialog only
+   ever offered `.ld` — `.ibt` had no GUI path to load at all until this pass added an
+   `.ibt` filter and extension-based dispatch to `main.rs`'s `load_file`, mirroring
+   `dump_channels`'s existing dispatch. That exposed a real, previously-untested bug
+   in `laps_from_lap_channel`: ported near-verbatim from TDA's `_find_laps`, it treats
+   any transition to `Lap == 0` as "probably no more useful data" and stops looking
+   for further laps right there — the real Hell RX rallycross capture (see above)
+   disproves that assumption outright, its `Lap` channel going `0 -> 1 -> 0 -> 1 -> 2
+   -> … -> 11` (a brief `Lap == 1` during the pre-green-flag formation movement,
+   then the counter resets to `0` at the actual race start and counts up through
+   eleven real racing laps afterward). The oracle's heuristic truncated lap
+   detection to the session's first ~16.6s (2 laps) out of a real ~494s recording (the
+   correct read is 16 boundaries/laps, averaging ~40s each, consistent with this
+   rallycross layout). Fixed by treating every `Lap` value change uniformly —
+   including a drop back to `0` — as an ordinary boundary, the same way
+   `laps_from_beacon` and `sde-shtep`'s `laps_from_lap_number_channel` (below) already
+   do, rather than special-casing zero — a deliberate, documented divergence from the
+   Python oracle, not a straight port anymore. While in this function, also hardened
+   the `LapDist`/`Speed` crossing-time back-computation against a `speed == 0`
+   transition sample (the real capture has exactly this at its very last sample),
+   which could otherwise divide out to a non-finite `f64` and corrupt every boundary
+   after it — falls back to the sample's own raw timecode when the back-computed
+   value isn't finite. Two new unit tests in `sde-core/src/lib.rs`
+   (`lap_channel_tests`) cover both: the real capture's zero-reset shape, and the
+   zero-speed division case. **Known cosmetic artifact, not fixed:** the real Hell RX
+   file's very last sample has a one-sample `Lap` flicker (`0 -> 11`, real telemetry
+   noise, not a parsing bug) that now surfaces as one spurious 0.0s-duration lap
+   entry in the picker; no general "drop degenerate-length laps" filter was added to
+   paper over it, since that's a judgment call better made with more real files to
+   validate against, not guessed at from one capture's glitch.
+   *(`shtep` TSV parser done, 2026-07-27 — see `crates/sde-formats/shtep`)*: not part
+   of the original XRK/IBT/VBOX/ADULOG/RUN/MLG list above — added because the `../shtep`
+   companion plugin (SimHub Telemetry Export Plugin) needs a Rust-side reader for what
+   it writes. Plain text, no binary layout to reverse-engineer: a `{base}.tsv` (tab-
+   separated, `Time_s` first column always, one configurable-subset column per
+   canonical channel, matched by header name not position) plus a `{base}.meta.json`
+   sidecar (session/car/driver metadata, `sessionType` "stage"/"stint",
+   `schemaVersion`-gated backward compatibility — a newer-than-understood version is
+   refused, everything else tolerated). No real plugin-exported fixture exists yet
+   (the plugin is still being built, no `.tsv`/`.meta.json` pairs committed there) —
+   the committed test fixture (`tests/fixtures/synthetic.tsv`/`.meta.json`) is
+   hand-authored directly from `SCHEMA.md`, same role the other crates' synthetic
+   fixtures play, swap for a real plugin export once one exists. Channel
+   unit/interpolate/dec_pts metadata is derived from the header name itself (`_kmh`,
+   `_pct`, `_deg`, `_mm`/`_m` suffixes; `Paused`/`Discontinuity`/`Gear`/`LapNumber`
+   treated as discrete) since `SCHEMA.md` bakes units into the column name rather than
+   declaring them separately, unlike MoTeC/IBT. Wired into `sde-core::Session::load_shtep`
+   — `laps_from_lap_number_channel` is new, boundary-per-`LapNumber`-change (simpler
+   than IBT's back-computed crossing time; `SCHEMA.md`'s fixed 100 Hz default sample
+   rate makes the imprecision a small enough window not to be worth the extra
+   complexity here) and only consulted for `"stint"` sessions — a `"stage"` recording
+   is one continuous run by definition (stage-start to stage-end, one file), so it
+   always gets a single whole-session lap. `KeyChannelMap::distance` now also checks
+   `"LapDistance_m"`. Sidecar `discontinuities`/`rewinds` arrays are parsed and exposed
+   on `ShtepFile` but not yet consumed by `sde-core` (both describe different things
+   than RBR/NGP's `TimePenalty` — a discontinuity/rewind isn't a scoring deduction) —
+   a documented follow-up, not forced into that model. `sde-app`'s "Open file..."
+   dialog does **not** yet offer `.tsv` — out of scope for this pass, matching how the
+   `.ibt` GUI wiring landed separately from the `sde-ibt` parser crate itself.
 5. **Core UI parity** — worksheets/docks, channel search, lap selection/comparison,
    math channels (matching the original tool's baseline usefulness).
    *(In progress, 2026-07-21)* Channel search + lap selection landed first, as the
@@ -1145,6 +1214,25 @@ blocked on the enum source, or on `sde-gis`/`sde-setup`, both unstarted).
   circuit-assuming name. `index 0` still means "the whole session" either way, so no
   downstream indexing changed. `app.slint`'s header label next to the lap/run
   `ComboBox` switches from `"Lap:"` to `"Run:"` when `lap-labels.length == 1`.
+
+*(Default worksheet panels, 2026-07-27):* a freshly loaded session previously started
+either from one bare channel (`pick_default_channel`'s alphabetical-first-interpolating
+pick) or a fully empty worksheet — neither matches the "glance-able default view"
+every established telemetry tool (MoTeC i2, Pi Toolbox) opens with. New
+`graph::default_dock_channels` builds one dock per role in a fixed
+`DEFAULT_DOCK_ROLES` list (speed, RPM, throttle, brake, gear, steering) that the
+session actually has a channel for — skipping roles with no match rather than
+leaving a blank dock. Each role is itself a candidate-name list checked in order,
+since the same channel is named differently per format (`"Ground Speed"` in MoTeC,
+`"Speed"` in IBT, `"Speed_kmh"` in `shtep`; `"RPM"` vs `"Engine0_RPM"`, etc.) — this
+can't be a single flat name list the way `KeyChannelMap::distance`'s lookup is,
+since here *multiple* different roles each need their own resolved name. Falls back
+to `pick_default_channel`'s old single-channel behavior (as one dock) only if *none*
+of the roles match anything, so an unfamiliar channel naming scheme still doesn't
+start from a blank canvas. `main.rs`'s `load_file` swaps this in for the old
+single-channel default; no other worksheet/dock plumbing changed, since
+`default_dock_channels` returns exactly the `Vec<Vec<String>>` shape
+`AppState.dock_channels` already expects.
 
 ## Open validation tasks (do before/while coding)
 

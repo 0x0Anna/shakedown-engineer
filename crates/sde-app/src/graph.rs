@@ -564,6 +564,55 @@ pub fn pick_default_channel(session: &sde_core::Session) -> Option<&Channel> {
         .or_else(|| names.first().and_then(|n| session.channels.get(*n)))
 }
 
+/// Candidate names for each "role" in the default worksheet, checked in
+/// order, one list per role — the same channel means different things by
+/// name across formats (e.g. speed is `"Ground Speed"` in MoTeC,
+/// `"Speed"` in IBT, `"Speed_kmh"` in `shtep`), so this can't be a single
+/// flat name list the way [`sde_core::KeyChannelMap`]'s `distance` lookup
+/// is. One dock is created per role that has *any* match in the loaded
+/// session; a role with no match is simply skipped, not left as an empty
+/// dock. Order here is the on-screen order, top to bottom.
+const DEFAULT_DOCK_ROLES: &[&[&str]] = &[
+    &["Ground Speed", "Speed", "Speed_kmh"],
+    &["RPM", "Engine0_RPM"],
+    &["Throttle", "THROTTLE", "Throttle_pct", "ThrottleRaw"],
+    &["Brake", "BRAKE", "Brake_pct", "BrakeRaw"],
+    &["Gear", "GEAR"],
+    &["SteeringWheelAngle", "STEERANGLE", "SteerAngle_deg"],
+];
+
+/// A sensible default worksheet for a freshly loaded session — one dock
+/// per [`DEFAULT_DOCK_ROLES`] entry the session actually has a channel
+/// for — rather than starting from either a single bare channel or a
+/// fully empty worksheet. Matches the "glance-able default view" every
+/// established telemetry tool (MoTeC i2, Pi Toolbox) opens with, instead
+/// of making every session start from a blank canvas.
+///
+/// Falls back to [`pick_default_channel`]'s single-channel pick (as one
+/// dock) if *none* of the roles match anything — an unfamiliar channel
+/// naming scheme shouldn't leave the worksheet empty either.
+#[must_use]
+pub fn default_dock_channels(session: &sde_core::Session) -> Vec<Vec<String>> {
+    let docks: Vec<Vec<String>> = DEFAULT_DOCK_ROLES
+        .iter()
+        .filter_map(|candidates| {
+            candidates
+                .iter()
+                .find(|name| session.channels.contains_key(**name))
+                .map(|name| vec![(*name).to_string()])
+        })
+        .collect();
+
+    if docks.is_empty() {
+        pick_default_channel(session)
+            .into_iter()
+            .map(|c| vec![c.name.clone()])
+            .collect()
+    } else {
+        docks
+    }
+}
+
 /// All channel names in `session`, sorted alphabetically — the unfiltered
 /// list backing the channel search/picker.
 #[must_use]
@@ -1197,6 +1246,55 @@ mod tests {
         let session = session_with(vec![a, b]);
         let picked = pick_default_channel(&session).expect("has channels");
         assert_eq!(picked.name, "B");
+    }
+
+    fn stub_channel(name: &str) -> Channel {
+        Channel {
+            name: name.to_string(),
+            units: String::new(),
+            dec_pts: 0,
+            interpolate: true,
+            timecodes: vec![0.0],
+            values: vec![0.0],
+        }
+    }
+
+    #[test]
+    fn default_dock_channels_picks_one_match_per_role_ibt_style_names() {
+        // IBT-shaped session: "Speed" not "Ground Speed", "Engine0_RPM"
+        // not "RPM", no steering channel present at all.
+        let session = session_with(vec![
+            stub_channel("Speed"),
+            stub_channel("Engine0_RPM"),
+            stub_channel("Throttle"),
+            stub_channel("BrakeRaw"),
+            stub_channel("Gear"),
+            stub_channel("SomeUnrelatedChannel"),
+        ]);
+        let docks = default_dock_channels(&session);
+        assert_eq!(
+            docks,
+            vec![
+                vec!["Speed".to_string()],
+                vec!["Engine0_RPM".to_string()],
+                vec!["Throttle".to_string()],
+                vec!["BrakeRaw".to_string()],
+                vec!["Gear".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn default_dock_channels_falls_back_to_pick_default_channel_when_no_role_matches() {
+        let session = session_with(vec![stub_channel("SomeWeirdChannel")]);
+        let docks = default_dock_channels(&session);
+        assert_eq!(docks, vec![vec!["SomeWeirdChannel".to_string()]]);
+    }
+
+    #[test]
+    fn default_dock_channels_empty_for_a_session_with_no_channels_at_all() {
+        let session = session_with(vec![]);
+        assert!(default_dock_channels(&session).is_empty());
     }
 
     /// End-to-end sanity check against the real synthetic fixture used by

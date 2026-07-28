@@ -20,6 +20,7 @@ pub mod mathexpr;
 
 pub use sde_ibt::IbtError;
 pub use sde_motec::{LdError, TimePenalty};
+pub use sde_shtep::ShtepError;
 
 /// A single telemetry channel. Field names mirror TDA's `Channel`
 /// dataclass (`data/base.py`).
@@ -66,6 +67,19 @@ impl From<sde_ibt::IbtChannel> for Channel {
     }
 }
 
+impl From<sde_shtep::ShtepChannel> for Channel {
+    fn from(c: sde_shtep::ShtepChannel) -> Self {
+        Self {
+            name: c.name,
+            units: c.unit,
+            dec_pts: c.dec_pts,
+            interpolate: c.interpolate,
+            timecodes: c.timecodes,
+            values: c.values,
+        }
+    }
+}
+
 /// A lap within the session, in milliseconds from the start of the log.
 /// Mirrors TDA's `Lap` dataclass.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -100,7 +114,7 @@ pub struct KeyChannelMap {
 /// distance channel by name the way it does `Beacon`, so this list is a
 /// best-effort guess pending a confirmed real-hardware example — same
 /// caveat as [`BEACON_CHANNEL_NAMES`]'s ACC-only validation.
-const DISTANCE_CHANNEL_NAMES: &[&str] = &["LapDist", "Distance"];
+const DISTANCE_CHANNEL_NAMES: &[&str] = &["LapDist", "Distance", "LapDistance_m"];
 
 /// Look up the first name from [`DISTANCE_CHANNEL_NAMES`] present in
 /// `channels`, shared by every format's `Session` loader.
@@ -201,6 +215,74 @@ impl Session {
             metadata,
             key_channel_map,
             file_name: ibt_file.file_name,
+            time_penalties: Vec::new(),
+        }
+    }
+
+    /// Load a session from a `shtep`-exported `.tsv` + `.meta.json`
+    /// sidecar pair on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns any [`ShtepError`] that `sde_shtep::parse` returns — i.e.
+    /// if either file can't be read, the sidecar is missing/malformed, or
+    /// the `.tsv` body itself is malformed.
+    pub fn load_shtep(path: &Path) -> Result<Self, ShtepError> {
+        let shtep_file = sde_shtep::parse(path)?;
+        Ok(Self::from_shtep_file(shtep_file))
+    }
+
+    /// Build a `Session` from an already-parsed `sde_shtep::ShtepFile`.
+    #[must_use]
+    pub fn from_shtep_file(shtep_file: sde_shtep::ShtepFile) -> Self {
+        let channels: HashMap<String, Channel> = shtep_file
+            .channels
+            .into_iter()
+            .map(|c| (c.name.clone(), Channel::from(c)))
+            .collect();
+
+        // `SCHEMA.md` has no GPS lat/long channels (only world-space
+        // Pos*_m, which `KeyChannelMap` has no slot for yet), so `lat`/
+        // `long`/`alt` stay `None` for every `shtep` session.
+        let key_channel_map = KeyChannelMap {
+            speed: has(&channels, "Speed_kmh"),
+            lat: None,
+            long: None,
+            alt: None,
+            distance: find_distance_channel(&channels),
+        };
+
+        let end_time = channels
+            .values()
+            .filter_map(|c| c.timecodes.last().copied())
+            .fold(0.0_f64, f64::max);
+
+        // A rally "stage" recording is one continuous run by definition
+        // (see `SCHEMA.md`'s write lifecycle: stage-start to stage-end,
+        // one file), so only a "stint" session bothers looking for a
+        // `LapNumber` channel to split on.
+        let laps = if shtep_file.session_type == "stage" {
+            boundaries_to_laps(&[0.0, end_time])
+        } else {
+            laps_from_lap_number_channel(&channels)
+                .unwrap_or_else(|| boundaries_to_laps(&[0.0, end_time]))
+        };
+
+        let mut metadata = HashMap::new();
+        metadata.insert("Sim".to_string(), shtep_file.sim);
+        metadata.insert("Session Type".to_string(), shtep_file.session_type);
+        metadata.insert("Context".to_string(), shtep_file.context);
+        metadata.insert("Car".to_string(), shtep_file.car);
+        metadata.insert("Driver".to_string(), shtep_file.driver);
+        metadata.insert("Start Time (UTC)".to_string(), shtep_file.start_time_utc);
+        metadata.insert("End Time (UTC)".to_string(), shtep_file.end_time_utc);
+
+        Self {
+            channels,
+            laps,
+            metadata,
+            key_channel_map,
+            file_name: shtep_file.file_name,
             time_penalties: Vec::new(),
         }
     }
@@ -360,8 +442,11 @@ fn boundaries_to_laps(boundaries: &[f64]) -> Vec<Lap> {
         .collect()
 }
 
-/// Derive lap boundaries from iRacing's explicit `Lap` channel, porting
-/// TDA's `data/iracing.py` `_find_laps` almost verbatim.
+/// Derive lap boundaries from iRacing's explicit `Lap` channel. Started
+/// as a near-verbatim port of TDA's `data/iracing.py` `_find_laps`, but
+/// **deliberately diverges from it in one place** — see below — after
+/// real-world validation against `.sample-data/iRacing/Hell RX/…`
+/// surfaced a case where the oracle's own heuristic is simply wrong.
 ///
 /// `LapCurrentLapTime` doesn't reset cleanly right at the lap boundary
 /// (and never reacts at all on an out lap), so instead of trusting the
@@ -369,6 +454,21 @@ fn boundaries_to_laps(boundaries: &[f64]) -> Vec<Lap> {
 /// back-computed from `LapDist`/`Speed`: `time_at_lapdist_0 =
 /// speed.timecodes[b] - lapdist[b] / speed[b] * 1000`, clamped to be no
 /// earlier than the previous sample's timecode.
+///
+/// **Divergence from the oracle:** TDA's `_find_laps` treats any
+/// transition to `Lap == 0` as "probably no more useful data" and stops
+/// looking for further laps right there. The real Hell RX rallycross
+/// capture disproves that assumption outright: its `Lap` channel goes
+/// `0 -> 1 -> 0 -> 1 -> 2 -> … -> 11` — a brief `Lap == 1` during the
+/// pre-green-flag formation movement, then the counter resets to `0` at
+/// the actual race start and counts up through eleven real racing laps
+/// afterward. Applying the oracle's heuristic here truncated lap
+/// detection to the first ~16.6s of a ~494s session (2 laps instead of
+/// the ~13 boundaries the full file actually has). This port therefore
+/// treats every `Lap` value change uniformly — including a drop back to
+/// `0` — as an ordinary boundary, the same way [`laps_from_beacon`] and
+/// `laps_from_lap_number_channel` (see `sde-shtep`) already do, rather
+/// than special-casing zero.
 ///
 /// Returns `None` if `Lap`/`LapDist`/`Speed` aren't all present with the
 /// expected units (`m`/`m/s`) and matching sample counts — the caller
@@ -391,7 +491,6 @@ fn laps_from_lap_channel(channels: &HashMap<String, Channel>) -> Option<Vec<Lap>
     }
 
     let mut boundaries = vec![0.0_f64];
-    let mut add_end = true;
 
     for b in 1..n {
         // Lap numbers are integer-valued floats (cast from an int32
@@ -404,22 +503,76 @@ fn laps_from_lap_channel(channels: &HashMap<String, Channel>) -> Option<Vec<Lap>
             continue;
         }
 
-        #[allow(clippy::float_cmp)]
-        let is_reset_to_zero = lap.values[b] == 0.0;
-        if is_reset_to_zero {
-            // Probably no more useful data (e.g. session ended mid-lap).
-            boundaries.push(speed.timecodes[b]);
-            add_end = false;
-            break;
-        }
-
+        // A transition sample with `speed == 0` (a stationary car sitting
+        // exactly on a lap boundary — not hypothetical, the real Hell RX
+        // capture has exactly this at its very last sample) can make this
+        // division non-finite (`±inf` when `lapdist != 0`, `NaN` when
+        // both are `0`). `.max()` already discards `NaN` safely (Rust
+        // defines `f64::max` to return the non-NaN operand), but `+inf`
+        // is a valid `f64` that would win the `.max()` outright and
+        // corrupt every boundary after it — falling back to the sample's
+        // own raw timecode keeps this always finite.
         let time_at_lapdist_0 = speed.timecodes[b] - lapdist.values[b] / speed.values[b] * 1000.0;
-        boundaries.push(speed.timecodes[b - 1].max(time_at_lapdist_0));
+        let time_at_lapdist_0 = if time_at_lapdist_0.is_finite() {
+            time_at_lapdist_0
+        } else {
+            speed.timecodes[b]
+        };
+        let boundary = speed.timecodes[b - 1].max(time_at_lapdist_0);
+        // A transition with a negative `LapDist` (the real Hell RX
+        // capture has one, `-0.41` at `t=11566.7ms`) back-computes a
+        // crossing time *after* the sample's own timecode, since the
+        // formula assumes `lapdist >= 0`. Clamping against the previous
+        // sample alone (above) doesn't protect against that overshoot
+        // then landing past a *later* transition's own boundary — which
+        // would otherwise make `boundaries` non-monotonic and produce a
+        // `Lap` with `end_time < start_time`. Clamping against the last
+        // *pushed* boundary too guarantees monotonicity regardless.
+        boundaries.push(boundary.max(*boundaries.last().unwrap_or(&0.0)));
     }
 
-    if add_end {
-        boundaries.push(*speed.timecodes.last()?);
+    // Same monotonicity clamp as inside the loop: a large enough
+    // negative-`LapDist` overshoot on the *last* transition could
+    // otherwise push a final boundary past the session's own real end
+    // time, producing an inverted final `Lap` instead of just a
+    // degenerate (zero-length) one.
+    let session_end = speed
+        .timecodes
+        .last()?
+        .max(*boundaries.last().unwrap_or(&0.0));
+    boundaries.push(session_end);
+
+    Some(boundaries_to_laps(&boundaries))
+}
+
+/// Derive lap boundaries from a `shtep` `.tsv`'s `LapNumber` channel
+/// (circuit `"stint"` sessions only — see `Session::from_shtep_file`,
+/// which only calls this when the sidecar's `sessionType` isn't
+/// `"stage"`). Unlike [`laps_from_lap_channel`]'s back-computed crossing
+/// time (iRacing's `LapDist`/`Speed` give it exact sub-sample precision),
+/// this is a simpler "boundary at the changed sample's own timecode" —
+/// `SCHEMA.md`'s fixed 100 Hz default sample rate makes that a small
+/// enough window not to be worth the extra complexity here; a known,
+/// documented simplification, not an oversight.
+fn laps_from_lap_number_channel(channels: &HashMap<String, Channel>) -> Option<Vec<Lap>> {
+    let lap_number = channels.get("LapNumber")?;
+    let n = lap_number.values.len();
+    if n == 0 || lap_number.timecodes.len() != n {
+        return None;
     }
+
+    let mut boundaries = vec![0.0_f64];
+    for b in 1..n {
+        // Lap numbers are integer-valued floats, so exact comparison is
+        // correct here, not a missing-epsilon bug — same rationale as
+        // `laps_from_lap_channel` above.
+        #[allow(clippy::float_cmp)]
+        let lap_changed = lap_number.values[b] != lap_number.values[b - 1];
+        if lap_changed {
+            boundaries.push(lap_number.timecodes[b]);
+        }
+    }
+    boundaries.push(*lap_number.timecodes.last()?);
 
     Some(boundaries_to_laps(&boundaries))
 }
@@ -484,4 +637,124 @@ fn build_metadata(m: &sde_motec::LdMetadata) -> HashMap<String, String> {
     }
 
     out
+}
+
+#[cfg(test)]
+mod lap_channel_tests {
+    use super::*;
+
+    fn channels(
+        lap: &[f64],
+        lapdist: &[f64],
+        speed: &[f64],
+        timecodes: &[f64],
+    ) -> HashMap<String, Channel> {
+        let mut m = HashMap::new();
+        m.insert(
+            "Lap".to_string(),
+            Channel {
+                name: "Lap".into(),
+                units: String::new(),
+                dec_pts: 0,
+                interpolate: false,
+                timecodes: timecodes.to_vec(),
+                values: lap.to_vec(),
+            },
+        );
+        m.insert(
+            "LapDist".to_string(),
+            Channel {
+                name: "LapDist".into(),
+                units: "m".into(),
+                dec_pts: 2,
+                interpolate: true,
+                timecodes: timecodes.to_vec(),
+                values: lapdist.to_vec(),
+            },
+        );
+        m.insert(
+            "Speed".to_string(),
+            Channel {
+                name: "Speed".into(),
+                units: "m/s".into(),
+                dec_pts: 2,
+                interpolate: true,
+                timecodes: timecodes.to_vec(),
+                values: speed.to_vec(),
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn a_zero_reset_mid_session_does_not_truncate_lap_detection() {
+        // Shape of the real Hell RX rallycross capture (see
+        // `laps_from_lap_channel`'s doc comment): a brief `Lap == 1`
+        // during the pre-green-flag formation movement, then the counter
+        // resets to `0` at the actual race start and keeps counting up
+        // through several more real laps afterward. The old oracle-ported
+        // heuristic stopped at the first `Lap == 0` transition and would
+        // have produced only 2 laps here; the fix should see all of them.
+        let timecodes = [0.0, 10_000.0, 15_000.0, 50_000.0, 90_000.0, 130_000.0];
+        let lap = [0.0, 1.0, 0.0, 1.0, 2.0, 3.0];
+        let lapdist = [0.0, 0.0, 0.0, 5.0, 5.0, 5.0];
+        let speed = [0.0, 10.0, 10.0, 30.0, 30.0, 30.0];
+        let channels = channels(&lap, &lapdist, &speed, &timecodes);
+
+        let laps = laps_from_lap_channel(&channels).expect("Lap/LapDist/Speed all present");
+
+        // 5 transitions (including the drop back to 0) split the session
+        // into 6 laps, not the 2 the old early-termination heuristic
+        // would have produced.
+        assert_eq!(laps.len(), 6);
+        // The final lap must reach all the way to the session's actual
+        // end, not stop early at the zero-reset.
+        assert_eq!(laps.last().unwrap().end_time, 130_000.0);
+    }
+
+    #[test]
+    fn a_transition_at_zero_speed_never_produces_an_infinite_boundary() {
+        // Regression guard for the `time_at_lapdist_0` division-by-zero
+        // case (see the `is_finite()` fallback in
+        // `laps_from_lap_channel`): a transition sample with `speed == 0`
+        // and nonzero `lapdist` would otherwise back-compute an infinite
+        // crossing time.
+        let timecodes = [0.0, 10_000.0, 20_000.0];
+        let lap = [0.0, 1.0, 1.0];
+        let lapdist = [0.0, 996.37, 996.37]; // nonzero lapdist ...
+        let speed = [0.0, 0.0, 0.0]; // ... paired with zero speed
+        let channels = channels(&lap, &lapdist, &speed, &timecodes);
+
+        let laps = laps_from_lap_channel(&channels).expect("Lap/LapDist/Speed all present");
+        for lap in &laps {
+            assert!(lap.start_time.is_finite());
+            assert!(lap.end_time.is_finite());
+        }
+    }
+
+    #[test]
+    fn a_negative_lapdist_overshoot_never_produces_a_negative_duration_lap() {
+        // A transition with negative `LapDist` (the real Hell RX capture
+        // has one, `-0.41` at one transition) back-computes a crossing
+        // time *after* the sample's own timecode, since the formula
+        // assumes `lapdist >= 0`. Here the overshoot from the first
+        // transition (huge negative lapdist, low speed) lands well past
+        // the second transition's own (much earlier) back-computed time —
+        // without clamping against the last *pushed* boundary too (not
+        // just the previous raw sample), `boundaries` would go
+        // non-monotonic and produce a `Lap` with `end_time < start_time`.
+        let timecodes = [0.0, 1_000.0, 1_010.0, 5_000.0];
+        let lap = [0.0, 1.0, 2.0, 2.0];
+        let lapdist = [0.0, -500.0, 0.1, 0.1];
+        let speed = [0.0, 5.0, 10.0, 10.0];
+        let channels = channels(&lap, &lapdist, &speed, &timecodes);
+
+        let laps = laps_from_lap_channel(&channels).expect("Lap/LapDist/Speed all present");
+        for lap in &laps {
+            assert!(
+                lap.end_time >= lap.start_time,
+                "lap {lap:?} has end_time before start_time"
+            );
+        }
+    }
 }

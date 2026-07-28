@@ -8,6 +8,7 @@ description = "Session/Channel/Lap data model built on top of sde-formats parser
 [dependencies]
 sde-motec = { path = "../sde-formats/motec" }
 sde-ibt = { path = "../sde-formats/ibt" }
+sde-shtep = { path = "../sde-formats/shtep" }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

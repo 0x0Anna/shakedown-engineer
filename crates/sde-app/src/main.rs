@@ -1,4 +1,4 @@
-//! Slint GUI shell: load a MoTeC `.ld` file, search/pick channels to add
+//! Slint GUI shell: load a MoTeC `.ld` or iRacing `.ibt` file, search/pick channels to add
 //! to a worksheet of stacked line-graph docks, optionally restrict the
 //! view to a single lap (or overlay several laps for comparison), and
 //! drag a shared vertical time cursor over the docks. See
@@ -148,8 +148,10 @@ fn main() -> Result<(), slint::PlatformError> {
             };
 
             let Some(path) = rfd::FileDialog::new()
+                .add_filter("Telemetry log", &["ld", "ibt"])
                 .add_filter("MoTeC log", &["ld"])
-                .set_title("Open MoTeC .ld file")
+                .add_filter("iRacing telemetry", &["ibt"])
+                .set_title("Open a .ld or .ibt telemetry log")
                 .pick_file()
             else {
                 return; // user cancelled
@@ -821,7 +823,19 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
         |n| n.to_string_lossy().to_string(),
     );
 
-    let session = match sde_core::Session::load_motec(path) {
+    // Dispatch on extension, matching `sde-cli`'s `dump_channels` — both
+    // format loaders return their own error type, so map to `String`
+    // early to keep this branch's two arms the same type.
+    let is_ibt = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ibt"));
+    let load_result = if is_ibt {
+        sde_core::Session::load_ibt(path).map_err(|e| e.to_string())
+    } else {
+        sde_core::Session::load_motec(path).map_err(|e| e.to_string())
+    };
+
+    let session = match load_result {
         Ok(s) => s,
         Err(e) => {
             window.set_window_title(format!("sde-app — failed to load {file_name}").into());
@@ -853,14 +867,14 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
     let all_channel_names = graph::channel_names(&session);
     let lap_labels = graph::lap_labels(&session);
     let compare_lap_labels: Vec<String> = (1..=session.laps.len()).map(|n| n.to_string()).collect();
-    let default_channel = graph::pick_default_channel(&session).map(|c| c.name.clone());
+    let default_dock_channels = graph::default_dock_channels(&session);
 
     {
         let mut state = state.borrow_mut();
         state.session = Some(session);
         state.all_channel_names.clone_from(&all_channel_names);
         state.filter_text.clear();
-        state.dock_channels = default_channel.into_iter().map(|n| vec![n]).collect();
+        state.dock_channels = default_dock_channels;
         state.overlay_pending.clear();
         state.selected_lap_index = 0;
         state.compare_lap_indices.clear();

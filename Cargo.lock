@@ -4267,6 +4267,7 @@ version = "0.1.0"
 dependencies = [
  "sde-ibt",
  "sde-motec",
+ "sde-shtep",
  "serde",
  "serde_json",
 ]
@@ -4297,6 +4298,15 @@ dependencies = [
 name = "sde-rbr"
 version = "0.1.0"
 dependencies = [
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "sde-shtep"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 2.0.19",
 ]
 
