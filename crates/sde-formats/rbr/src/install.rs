@@ -231,62 +231,41 @@ mod tests {
 
     #[test]
     fn resolves_default_paths_from_root() {
-        let paths = InstallConfig::new("C:\\Richard Burns Rally").resolve();
+        let root = PathBuf::from("C:\\Richard Burns Rally");
+        let paths = InstallConfig::new(&root).resolve();
 
         assert_eq!(
             paths.ngp_telemetry_dir,
-            PathBuf::from("C:\\Richard Burns Rally\\Plugins\\NGP\\telemetry")
+            root.join("Plugins").join("NGP").join("telemetry")
         );
         assert_eq!(
             paths.ngp_telemetry_ini,
-            PathBuf::from("C:\\Richard Burns Rally\\Plugins\\NGP\\Telemetry.ini")
+            root.join("Plugins").join("NGP").join("Telemetry.ini")
         );
-        assert_eq!(
-            paths.rbr_ini,
-            PathBuf::from("C:\\Richard Burns Rally\\RichardBurnsRally.ini")
-        );
-        assert_eq!(
-            paths.replays_dir,
-            PathBuf::from("C:\\Richard Burns Rally\\Replays")
-        );
-        assert_eq!(
-            paths.saved_games_dir,
-            PathBuf::from("C:\\Richard Burns Rally\\SavedGames")
-        );
-        assert_eq!(
-            paths.pacenote_dir,
-            PathBuf::from("C:\\Richard Burns Rally\\Plugins\\Pacenote")
-        );
-        assert_eq!(
-            paths.rsf_cars_dir,
-            PathBuf::from("C:\\Richard Burns Rally\\rsfdata\\cars")
-        );
-        assert_eq!(
-            paths.maps_dir,
-            PathBuf::from("C:\\Richard Burns Rally\\Maps")
-        );
-        assert_eq!(
-            paths.rsf_ini,
-            PathBuf::from("C:\\Richard Burns Rally\\RallySimFans.ini")
-        );
+        assert_eq!(paths.rbr_ini, root.join("RichardBurnsRally.ini"));
+        assert_eq!(paths.replays_dir, root.join("Replays"));
+        assert_eq!(paths.saved_games_dir, root.join("SavedGames"));
+        assert_eq!(paths.pacenote_dir, root.join("Plugins").join("Pacenote"));
+        assert_eq!(paths.rsf_cars_dir, root.join("rsfdata").join("cars"));
+        assert_eq!(paths.maps_dir, root.join("Maps"));
+        assert_eq!(paths.rsf_ini, root.join("RallySimFans.ini"));
         assert_eq!(
             paths.rsf_personal_ini,
-            PathBuf::from("C:\\Richard Burns Rally\\rallysimfans_personal.ini")
+            root.join("rallysimfans_personal.ini")
         );
     }
 
     #[test]
     fn a_single_override_only_changes_that_one_path() {
-        let mut config = InstallConfig::new("C:\\Richard Burns Rally");
-        config.overrides.ngp_telemetry_dir = Some(PathBuf::from("D:\\ngp-telemetry"));
+        let root = PathBuf::from("C:\\Richard Burns Rally");
+        let mut config = InstallConfig::new(&root);
+        let override_dir = PathBuf::from("D:\\ngp-telemetry");
+        config.overrides.ngp_telemetry_dir = Some(override_dir.clone());
         let paths = config.resolve();
 
-        assert_eq!(paths.ngp_telemetry_dir, PathBuf::from("D:\\ngp-telemetry"));
+        assert_eq!(paths.ngp_telemetry_dir, override_dir);
         // Everything else still derives from root.
-        assert_eq!(
-            paths.replays_dir,
-            PathBuf::from("C:\\Richard Burns Rally\\Replays")
-        );
+        assert_eq!(paths.replays_dir, root.join("Replays"));
     }
 
     #[test]
