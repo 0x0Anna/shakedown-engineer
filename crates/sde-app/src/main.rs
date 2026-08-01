@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use slint::ComponentHandle;
 
-use sde_app::graph;
+use sde_app::{graph, replay_check};
 
 slint::include_modules!();
 
@@ -69,6 +69,17 @@ const fn series_color(index: usize) -> slint::Color {
 #[derive(Default)]
 struct AppState {
     session: Option<sde_core::Session>,
+    /// Resolved once the user points the app at an RBR/RSF install root
+    /// (see `on_set_install_root`). Used to default the "Open file..."/
+    /// "Open replay info..." dialogs to the right folders; `None` means no
+    /// root has been set yet, so those dialogs just open wherever the OS
+    /// defaults to.
+    install_paths: Option<sde_rbr::InstallPaths>,
+    /// The most recently loaded replay `.rpl`/`.ini` sidecar, if any (see
+    /// `on_open_replay_info`). Independent of `session` — loading a new
+    /// telemetry file doesn't clear this, since the same replay info stays
+    /// relevant until the user picks a different one.
+    replay_info: Option<sde_rbr::ReplayInfo>,
     all_channel_names: Vec<String>,
     filter_text: String,
     /// Worksheet docks, in display order. Each dock overlays one or more
@@ -135,9 +146,56 @@ const VIEW_HEIGHT: f64 = 1000.0;
 /// `DockData.grid-col`/`grid-row`).
 const GRID_COLUMNS: i32 = 2;
 
+/// Where the install-root config file lives: `%APPDATA%\sde-app\` on
+/// Windows (this app's only target platform today — see `Cargo.toml`).
+/// `None` if `%APPDATA%` isn't set, in which case the install root simply
+/// isn't persisted rather than the app failing to start.
+fn config_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA").map(|appdata| std::path::PathBuf::from(appdata).join("sde-app"))
+}
+
+/// Resolve `root` into [`sde_rbr::InstallPaths`], validate it, read the
+/// `[NGP]` recording settings, and push all three into `state`/the window
+/// as `install_status_text`. Shared by the "RBR install root..." button
+/// (a freshly picked root) and startup (a root loaded from the persisted
+/// config file via `config_dir`/`sde_app::config::load_install_root`) so
+/// both paths report identically.
+fn apply_install_root(window: &AppWindow, state: &Rc<RefCell<AppState>>, root: std::path::PathBuf) {
+    let install_paths = sde_rbr::InstallConfig::new(root).resolve();
+    let report = sde_rbr::validate(&install_paths);
+    let ngp_settings = sde_rbr::read_ngp_settings(&install_paths).ok();
+
+    let mut status = if report.root_looks_valid() {
+        format!("RBR install root: {}", install_paths.root.display())
+    } else {
+        format!(
+            "Warning: {} doesn't look like an RBR install (missing RichardBurnsRally.ini and/or Plugins\\NGP\\Telemetry.ini).",
+            install_paths.root.display()
+        )
+    };
+    if !report.missing.is_empty() {
+        status.push_str(&format!(
+            " {} expected path(s) not found.",
+            report.missing.len()
+        ));
+    }
+    match ngp_settings.and_then(|s| s.telemetry_recording) {
+        Some(true) => status.push_str(" Telemetry recording: ON."),
+        Some(false) => status.push_str(" Telemetry recording: OFF."),
+        None => {}
+    }
+
+    state.borrow_mut().install_paths = Some(install_paths);
+    window.set_install_status_text(status.into());
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let window = AppWindow::new()?;
     let state: Rc<RefCell<AppState>> = Rc::new(RefCell::new(AppState::default()));
+
+    if let Some(root) = config_dir().and_then(|dir| sde_app::config::load_install_root(&dir)) {
+        apply_install_root(&window, &state, root);
+    }
 
     {
         let window_weak = window.as_weak();
@@ -147,17 +205,85 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
 
-            let Some(path) = rfd::FileDialog::new()
+            let mut dialog = rfd::FileDialog::new()
                 .add_filter("Telemetry log", &["ld", "ibt"])
                 .add_filter("MoTeC log", &["ld"])
                 .add_filter("iRacing telemetry", &["ibt"])
-                .set_title("Open a .ld or .ibt telemetry log")
-                .pick_file()
-            else {
+                .set_title("Open a .ld or .ibt telemetry log");
+            if let Some(dir) = state
+                .borrow()
+                .install_paths
+                .as_ref()
+                .map(|p| p.ngp_telemetry_dir.clone())
+            {
+                dialog = dialog.set_directory(dir);
+            }
+            let Some(path) = dialog.pick_file() else {
                 return; // user cancelled
             };
 
             load_file(&window, &state, &path);
+            refresh_replay_status(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_set_install_root(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(root) = rfd::FileDialog::new()
+                .set_title("Select the RBR install root (e.g. C:\\Richard Burns Rally)")
+                .pick_folder()
+            else {
+                return; // user cancelled
+            };
+
+            apply_install_root(&window, &state, root.clone());
+
+            // Best-effort: failing to persist just means this root has to
+            // be re-picked next launch, not that it stops working now.
+            if let Some(dir) = config_dir() {
+                let _ = sde_app::config::save_install_root(&dir, &root);
+            }
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_open_replay_info(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+
+            let mut dialog = rfd::FileDialog::new()
+                .add_filter("Replay metadata", &["ini"])
+                .set_title("Open a replay metadata (.ini) sidecar");
+            if let Some(dir) = state
+                .borrow()
+                .install_paths
+                .as_ref()
+                .map(|p| p.replays_dir.clone())
+            {
+                dialog = dialog.set_directory(dir);
+            }
+            let Some(path) = dialog.pick_file() else {
+                return; // user cancelled
+            };
+
+            match sde_rbr::parse_replay_ini(&path) {
+                Ok(replay) => {
+                    state.borrow_mut().replay_info = Some(replay);
+                }
+                Err(e) => {
+                    window.set_replay_status_text(format!("Error loading replay info: {e}").into());
+                    return;
+                }
+            }
+            refresh_replay_status(&window, &state);
         });
     }
 
@@ -817,6 +943,47 @@ fn refresh_axis_ui(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     window.set_axis_distance_available(distance_available);
 }
 
+/// Push a summary of the currently loaded replay `.rpl`/`.ini` sidecar
+/// (stage/car/driving-time) into the window, plus a recovery-spot
+/// cross-check against the currently loaded telemetry session if one is
+/// loaded too (see `replay_check::cross_check_recoveries`). Called after
+/// loading a replay `.ini` and after loading a telemetry file (since either
+/// one changing affects whether/what cross-check runs).
+fn refresh_replay_status(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
+    let state = state.borrow();
+    let Some(replay) = state.replay_info.as_ref() else {
+        window.set_replay_status_text(String::new().into());
+        return;
+    };
+
+    let mut parts = Vec::new();
+    if let Some(name) = &replay.stage.name {
+        parts.push(format!("Stage: {name}"));
+    }
+    if let Some(model) = &replay.car.model {
+        parts.push(format!("Car: {model}"));
+    }
+    if let Some(driving_time) = replay.driving_time_secs() {
+        parts.push(format!("Driving time: {driving_time:.1}s"));
+    }
+    let mut text = format!("Replay: {}", parts.join(" | "));
+
+    if let Some(session) = state.session.as_ref() {
+        let check = replay_check::cross_check_recoveries(session, replay);
+        let agreement = if check.looks_consistent() {
+            "consistent"
+        } else {
+            "MISMATCH"
+        };
+        text.push_str(&format!(
+            " — recoveries: replay {} / telemetry {} ({agreement})",
+            check.replay_count, check.telemetry_count
+        ));
+    }
+
+    window.set_replay_status_text(text.into());
+}
+
 fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
     let file_name = path.file_name().map_or_else(
         || path.to_string_lossy().to_string(),
@@ -840,7 +1007,19 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
         Err(e) => {
             window.set_window_title(format!("sde-app — failed to load {file_name}").into());
             window.set_status_text(format!("Error loading {file_name}: {e}").into());
-            *state.borrow_mut() = AppState::default();
+            {
+                // Preserve the install root / loaded replay info across a
+                // failed load — a bad file pick shouldn't cost the user a
+                // config they already set up.
+                let mut state_mut = state.borrow_mut();
+                let install_paths = state_mut.install_paths.take();
+                let replay_info = state_mut.replay_info.take();
+                *state_mut = AppState {
+                    install_paths,
+                    replay_info,
+                    ..AppState::default()
+                };
+            }
             window.set_docks(to_dock_model(vec![]));
             window.set_channel_names(to_model(vec![]));
             window.set_channel_active(to_bool_model(vec![]));
@@ -951,6 +1130,23 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
 
     let mut docks = Vec::with_capacity(state.dock_channels.len());
 
+    // Comparing laps gives color a *different* meaning (which lap, shared
+    // across every dock via `refresh_compare_ui`'s own top-level legend —
+    // see `series_color(i)` there, indexed by position in
+    // `compare_lap_indices`) than the plain case (which channel). Mixing
+    // the two would desync a dock's trace color from what the shared
+    // legend says it means, so only the plain case rotates a color per
+    // dock/channel here; comparison mode keeps starting each dock fresh at
+    // color 0 to line up with that legend. `ranges.len()` is the same for
+    // every dock in this call (computed once, above), so this is decided
+    // once rather than per dock.
+    let comparing = ranges.len() > 1;
+    // Oscilloscope-style: each successive dock/channel gets the next
+    // color in the palette rather than every single-channel dock
+    // restarting at color 0 (which made every dock the same blue). Only
+    // advances outside comparison mode — see above.
+    let mut worksheet_color_index = 0usize;
+
     for (i, group) in state.dock_channels.iter().enumerate() {
         // Fixed `GRID_COLUMNS`-wide grid position for the "Grid" layout
         // mode; ignored by the other layout modes. Computed here so
@@ -963,8 +1159,10 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
         // One color per (channel, lap-range) combination generated,
         // sequential in that order — for the common single-channel case
         // this is exactly the old per-lap coloring; overlaying channels
-        // just extends the same sequence.
-        let mut color_index = 0usize;
+        // just extends the same sequence. Starts from the running
+        // worksheet-wide index (plain mode) or fresh at 0 (comparison
+        // mode, to match the shared legend) — see above.
+        let mut color_index = if comparing { 0 } else { worksheet_color_index };
 
         for name in group {
             let Some(channel) = session.channels.get(name) else {
@@ -1010,6 +1208,10 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
                     color_index += 1;
                 }
             }
+        }
+
+        if !comparing {
+            worksheet_color_index = color_index;
         }
 
         let channel_name = group.join(" + ");

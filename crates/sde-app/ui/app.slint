@@ -211,9 +211,13 @@ export component AppWindow inherits Window {
     in-out property <int> layout-mode: 0; // 0 = stacked, 1 = side-by-side, 2 = grid; pure UI state
     in property <string> axis-mode-label: "Time"; // "Time" or "Distance"
     in property <bool> axis-distance-available: false; // whether the loaded session has a distance channel
+    in property <string> install-status-text: ""; // RBR install root validation summary; "" until one is set
+    in property <string> replay-status-text: ""; // loaded .rpl/.ini metadata + recovery cross-check summary
 
     // -- callbacks into Rust --
     callback open-file();
+    callback set-install-root();
+    callback open-replay-info();
     callback cursor-moved(float); // fraction 0..1 across the graph width
     callback channel-filter-changed(string);
     callback dock-selected(string); // toggles a channel in/out of the worksheet as its own dock
@@ -240,6 +244,14 @@ export component AppWindow inherits Window {
             Button {
                 text: "Open file...";
                 clicked => { root.open-file(); }
+            }
+            Button {
+                text: "RBR install root...";
+                clicked => { root.set-install-root(); }
+            }
+            Button {
+                text: "Open replay info...";
+                clicked => { root.open-replay-info(); }
             }
             Text {
                 text: root.window-title;
@@ -317,6 +329,22 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+        }
+
+        if root.install-status-text != "" || root.replay-status-text != "": VerticalLayout {
+            spacing: 2px;
+            if root.install-status-text != "": Text {
+                text: root.install-status-text;
+                font-size: 12px;
+                color: gray;
+                wrap: word-wrap;
+            }
+            if root.replay-status-text != "": Text {
+                text: root.replay-status-text;
+                font-size: 12px;
+                color: gray;
+                wrap: word-wrap;
             }
         }
 

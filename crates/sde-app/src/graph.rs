@@ -567,18 +567,39 @@ pub fn pick_default_channel(session: &sde_core::Session) -> Option<&Channel> {
 /// Candidate names for each "role" in the default worksheet, checked in
 /// order, one list per role — the same channel means different things by
 /// name across formats (e.g. speed is `"Ground Speed"` in MoTeC,
-/// `"Speed"` in IBT, `"Speed_kmh"` in `shtep`), so this can't be a single
-/// flat name list the way [`sde_core::KeyChannelMap`]'s `distance` lookup
-/// is. One dock is created per role that has *any* match in the loaded
+/// `"Speed"` in IBT, `"Speed_kmh"` in `shtep`, `"speed"` in RSF/NGP's own
+/// dotted-field-name `.ld`/`.tsv` exports), so this can't be a single flat
+/// name list the way [`sde_core::KeyChannelMap`]'s `distance` lookup is.
+/// One dock is created per role that has *any* match in the loaded
 /// session; a role with no match is simply skipped, not left as an empty
 /// dock. Order here is the on-screen order, top to bottom.
+///
+/// The RSF/NGP names (`speed`, `engineRotation`, `throttle`, `brake`,
+/// `gear`, `steering`) are confirmed against a real capture's channel list
+/// (`.sample-data/RBR/…/Run1/motec/*.ld`, see PROJECT_PLAN.md's "RSF
+/// real-capture validation" section) — before these were added, a loaded
+/// RSF session matched none of the other formats' names and fell all the
+/// way through to [`pick_default_channel`]'s single-channel fallback,
+/// which is the "only shows one panel" bug this list closes for that
+/// format.
 const DEFAULT_DOCK_ROLES: &[&[&str]] = &[
-    &["Ground Speed", "Speed", "Speed_kmh"],
-    &["RPM", "Engine0_RPM"],
-    &["Throttle", "THROTTLE", "Throttle_pct", "ThrottleRaw"],
-    &["Brake", "BRAKE", "Brake_pct", "BrakeRaw"],
-    &["Gear", "GEAR"],
-    &["SteeringWheelAngle", "STEERANGLE", "SteerAngle_deg"],
+    &["Ground Speed", "Speed", "Speed_kmh", "speed"],
+    &["RPM", "Engine0_RPM", "engineRotation"],
+    &[
+        "Throttle",
+        "THROTTLE",
+        "Throttle_pct",
+        "ThrottleRaw",
+        "throttle",
+    ],
+    &["Brake", "BRAKE", "Brake_pct", "BrakeRaw", "brake"],
+    &["Gear", "GEAR", "gear"],
+    &[
+        "SteeringWheelAngle",
+        "STEERANGLE",
+        "SteerAngle_deg",
+        "steering",
+    ],
 ];
 
 /// A sensible default worksheet for a freshly loaded session — one dock
@@ -1280,6 +1301,35 @@ mod tests {
                 vec!["Throttle".to_string()],
                 vec!["BrakeRaw".to_string()],
                 vec!["Gear".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn default_dock_channels_picks_one_match_per_role_rsf_ngp_style_names() {
+        // RSF/NGP-shaped session: the exact lowercase dotted field names
+        // confirmed against a real capture (see the DEFAULT_DOCK_ROLES doc
+        // comment) — this used to match none of the other formats' names
+        // and fall through to a single-channel worksheet.
+        let session = session_with(vec![
+            stub_channel("speed"),
+            stub_channel("engineRotation"),
+            stub_channel("throttle"),
+            stub_channel("brake"),
+            stub_channel("gear"),
+            stub_channel("steering"),
+            stub_channel("LF.brakeDiskTemp"),
+        ]);
+        let docks = default_dock_channels(&session);
+        assert_eq!(
+            docks,
+            vec![
+                vec!["speed".to_string()],
+                vec!["engineRotation".to_string()],
+                vec!["throttle".to_string()],
+                vec!["brake".to_string()],
+                vec!["gear".to_string()],
+                vec!["steering".to_string()],
             ]
         );
     }

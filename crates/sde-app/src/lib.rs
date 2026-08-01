@@ -6,5 +6,6 @@
 //! tested without a display. The actual window/event loop lives in
 //! `main.rs`.
 
+pub mod config;
 pub mod graph;
 pub mod replay_check;
