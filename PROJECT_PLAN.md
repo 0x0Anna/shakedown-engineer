@@ -1298,32 +1298,249 @@ single-channel default; no other worksheet/dock plumbing changed, since
       file. Tested with verbatim inline copies of both sample sidecars, plus an
       on-disk test that runs against `.sample-data/` when present and skips
       cleanly in CI.
-- [ ] Decide how replay metadata reaches the app. `Session` is telemetry-shaped
-      and `sde-core` deliberately doesn't depend on `sde-rbr`; pairing a `.ld`
-      with its `.ini` also can't rely on the folder layout in `.sample-data/`
-      (that's a hand-made capture convention, not RSF's own). Probably belongs
-      in `sde-app` or a small session-assembly layer, not in `sde-core`.
-- [ ] Cross-check `ReplayInfo::recovery_spots` against
-      `Session::time_penalties` on load — counts should match, and each
-      `position_m` should agree with the stage distance at the corresponding
-      penalty. Cheap, and it validates that a `.ld` and a `.rpl` describe the
-      same run.
+- [x] **Decide how replay metadata reaches the app (2026-07-31):** `sde-app`
+      is the pairing point, confirmed by implementing the next item there —
+      it's the one crate allowed to depend on both `sde-core` (for `Session`)
+      and `sde-rbr` (for `ReplayInfo`) without violating `sde-core`'s
+      deliberate non-dependency on `sde-rbr`. Added `sde-rbr` as an `sde-app`
+      dependency. *(UI wiring landed 2026-07-31, see below — was originally
+      scoped as decision-only.)*
+- [x] **Cross-check `ReplayInfo::recovery_spots` against
+      `Session::time_penalties` (2026-07-31):** new `sde_app::replay_check`
+      module (`crates/sde-app/src/replay_check.rs`, Slint-free and unit
+      tested independent of any UI) — `cross_check_recoveries(&Session,
+      &ReplayInfo) -> RecoveryCrossCheck` pairs the two lists by
+      chronological order (both are already ordered — recovery spots by file
+      position, time penalties by timecode) rather than by nearest position,
+      since matching by position is exactly what this validates, not an
+      assumption to bake in. Reports whether the counts match, and per pair,
+      whether the replay's recorded `position_m` agrees (within a 50 m
+      `POSITION_TOLERANCE_M`, generous because the replay's position is where
+      the recovery prompt was accepted, not the exact stage-clock jump point)
+      with the session's distance channel evaluated at the telemetry
+      penalty's timecode (via `sde_app::graph::value_at`, reused rather than
+      re-implemented). A session with no distance channel reports `None` for
+      that comparison — uninformative, not a mismatch, so
+      `RecoveryCrossCheck::looks_consistent()` still passes rather than
+      penalizing formats/sessions that never had a distance channel to begin
+      with.
+- [x] **UI wiring for install root / replay info (2026-07-31):** `sde-app`
+      gained two header buttons — "RBR install root..." (folder picker ->
+      `InstallConfig::new(root).resolve()` -> `validate()` +
+      `read_ngp_settings()`, shown as a status line: root validity, count of
+      missing expected paths, and the NGP recording-on/off toggle) and "Open
+      replay info..." (file picker filtered to `.ini`, defaulting to
+      `install_paths.replays_dir` when a root is set, same way "Open file..."
+      now defaults to `install_paths.ngp_telemetry_dir`) — plus a status row
+      in `app.slint` showing both. Loading a replay `.ini` (or loading a new
+      telemetry file while one is already loaded) calls
+      `refresh_replay_status`, which runs `replay_check::cross_check_recoveries`
+      against the current session whenever both are loaded and reports
+      `"consistent"` or `"MISMATCH"` alongside the replay's stage/car/driving
+      time. **Still manual, not automatic**: the app does not auto-pair a
+      loaded `.ld`/`.tsv` with a `.rpl`/`.ini` — the user opens each
+      independently (still no known filename/folder convention to pair them
+      by, per the note above; `install_paths` only narrows *which folder*
+      each picker starts in). One real bug caught and fixed while wiring
+      this in: `load_file`'s failure path unconditionally reset the whole
+      `AppState` to `default()`, which would have silently discarded an
+      already-configured install root and loaded replay info on a bad file
+      pick — now preserves both across a failed load. Verified by hand
+      (real `.ld`/`.rpl`/`.ini` triple from `.sample-data/`): both buttons
+      render, the install status line shows the root path and "Telemetry
+      recording: ON", and pairing a `.ld` with a mismatched `.ini` correctly
+      surfaces as "MISMATCH" in the replay status line.
+- [x] **Three bugs found in live testing, fixed (2026-07-31):** Anna tested
+      the above UI wiring directly and found three real problems, all fixed
+      in the same pass:
+      1. **Default worksheet showed only one panel for RSF/NGP sessions.**
+         `graph::DEFAULT_DOCK_ROLES` (milestone 5's default-dock-channels
+         list) only knew MoTeC/IBT/shtep naming conventions
+         (`"Ground Speed"`/`"Speed"`/`"Speed_kmh"`, etc.); RSF/NGP's own
+         lowercase dotted field names (`speed`, `engineRotation`,
+         `throttle`, `brake`, `gear`, `steering` — confirmed via
+         `dump_channels` against the real `.sample-data/RBR/…/Run1/motec/
+         *.ld` capture) matched none of them, so every RSF session fell
+         through to the single-channel fallback. Fixed by adding the
+         confirmed real names to each role's candidate list; new
+         `default_dock_channels_picks_one_match_per_role_rsf_ngp_style_names`
+         regression test in `graph.rs` uses the exact confirmed names.
+      2. **Install root wasn't remembered across app restarts.** No
+         persistence existed at all — every launch required re-picking the
+         root via the button. New `sde_app::config` module
+         (`crates/sde-app/src/config.rs`) writes the chosen root to
+         `%APPDATA%\sde-app\install_root.txt` (best-effort — a failed
+         write just means it isn't remembered next time, not a hard
+         error) and `main()` auto-loads it at startup through the same
+         `apply_install_root` helper the button uses (extracted from the
+         button's closure so both paths report identically). Four new
+         unit tests (round-trip, missing file, empty file, overwrite).
+      3. **"Open replay info..." appeared to do nothing** on Anna's first
+         live test. Root cause not fully isolated (the cross-check logic
+         itself checks out under its own unit tests and worked correctly
+         once retested), but a real related bug was found and fixed while
+         investigating: `load_file`'s failure path (see the entry above)
+         reset the whole `AppState`, which — before this fix — would have
+         made a just-loaded replay's info vanish the moment *any*
+         subsequent file load failed, which could plausibly look like "the
+         button did nothing" if a failed load happened to follow it.
+      All three verified live afterward (Anna confirmed the default
+      multi-panel view; a fresh headless-launch screenshot showed the
+      install root and NGP recording status auto-populated with no
+      button click, proving the persistence round-trip).
+- [x] **Oscilloscope-style trace color rotation (2026-07-31):** every
+      non-overlay, non-comparison dock previously rendered its single
+      trace in the same color (`SERIES_COLORS[0]`, always blue) — the
+      per-series color index reset to `0` at the start of every dock. Per
+      Anna's request, `replot` in `main.rs` now threads a single
+      `worksheet_color_index` across the whole dock loop instead of a
+      fresh `color_index` per dock, so successive docks/channels cycle
+      through the 8-entry palette like an oscilloscope (first channel
+      blue, second orange, third green, ...). Deliberately **not** applied
+      during lap comparison: there, color already has an established,
+      different meaning (which lap, via the shared top-level legend built
+      in `refresh_compare_ui`, indexed by position in
+      `compare_lap_indices`) that's consistent across every dock — mixing
+      the two would desync a dock's trace color from what that legend
+      says it represents. `replot` decides `comparing = ranges.len() > 1`
+      once (same `ranges` list is shared by every dock in one call) and
+      only advances `worksheet_color_index` when `!comparing`, so
+      comparison mode's per-range coloring (still starting fresh at `0`
+      per dock) is unchanged. An empty/no-data dock doesn't consume a
+      color slot. Verified live: a freshly loaded shtep session's default
+      three-panel view (`Speed_kmh`/`RPM`/`Throttle_pct`) now renders
+      blue/orange/green respectively instead of all blue.
+      *(Bug found by independent code review, fixed 2026-08-01):* `comparing`
+      was computed as `ranges.len() > 1`, but a user can toggle on exactly
+      **one** compare chip (nothing stops them, and `refresh_compare_ui`'s
+      status text already special-cases "Comparing 1 lap" grammar), which
+      also yields exactly one range — so a single-lap comparison was
+      silently treated as the plain case, letting the color rotation
+      advance past dock 0 and desync every dock after the first from the
+      legend's single swatch (which always starts at color 0 for that one
+      lap). Fixed by keying `comparing` on `!state.compare_lap_indices.is_empty()`
+      instead of the range count — the actual selection state, not a
+      count that happens to coincide with it in the common multi-lap case.
+- [x] **Auto-locate the matching replay `.ini` (2026-08-01):** per Anna's
+      request, after testing "Open replay info..." and realizing she'd
+      expected it to auto-populate rather than need a second manual pick.
+      New `sde_rbr::pairing` module (`crates/sde-formats/rbr/src/
+      pairing.rs`) — `find_matching_replay_ini(telemetry_path, replays_dir)`
+      matches by modification-time proximity, since RSF/NGP has no shared
+      filename/folder convention between a `.ld`/`.tsv` and its `.rpl`/
+      `.ini` (confirmed no correlation between
+      `telemetry-NGP-Car_5-Mini JCW WRC-Stage_450-...` and
+      `Anna_rsf_hotlap_Gabiria-Legazpi 2004_...` filenames). Timing *is*
+      shared, though: checked real file mtimes from both sample captures
+      (`PROJECT_PLAN.md`'s "RSF real-capture validation" section) — each
+      run's `.ld` trails its own `.ini` by 6s and 41s respectively, while
+      the two different runs in that capture are ~7 minutes apart. A
+      180s tolerance window (comfortably above the largest observed gap,
+      comfortably below the inter-run gap) with nearest-match-wins is
+      therefore a workable heuristic, not a guarantee — flagged as such in
+      the doc comment, and still only as good as the real distribution of
+      gaps this was tuned against. Five unit tests using real
+      `std::fs::File::set_modified` temp files (closest-within-tolerance
+      picked over a further-but-still-in-range one matching the two real
+      runs' gaps, out-of-tolerance is `None`, non-`.ini` files ignored,
+      missing telemetry file/replays dir don't panic).
+      `sde-app`'s `load_file` now calls this automatically whenever
+      `install_paths` is set, replacing (not just adding to) whatever
+      `replay_info` a previous file load left behind — a stale replay
+      belongs to a different run and would otherwise silently mismatch (see
+      `AppState::replay_info`'s doc comment: reset on every successful
+      load, still preserved across a *failed* one). A new
+      `AppState::replay_auto_match_gap` records how tight the winning
+      match was, shown in the status line (`"Replay (auto-matched,
+      Δ40s): ..."`) so the user can judge confidence; `None` (and no
+      "(auto-matched, ...)" prefix) when `replay_info` came from the
+      manual "Open replay info..." button instead. Verified live against
+      the real install (`C:\Richard Burns Rally\Replays\` /
+      `Plugins\NGP\telemetry\`, not just `.sample-data/`): loading a real
+      `.ld` auto-matched its replay at `Δ40s` and displayed correctly.
+- [x] **Surface more of the replay `.ini`'s fields (2026-08-01):** the
+      replay status line (`refresh_replay_status` in `main.rs`) previously
+      showed only stage/car/driving-time. Per Anna's question about what
+      else is in `ReplayInfo`, added setup file name (`car.setup_name`,
+      last path segment only via a new `path_basename` helper — RSF's own
+      values use `\` regardless of host OS, so `Path::file_name` isn't
+      reliable here), surface/weather conditions
+      (`tyre_type`/`weather_type`/`surface_wetness`), and NGP physics
+      version (`versions.ngp`) — the fields that decide whether two runs
+      are *actually* comparable (matches `PROJECT_PLAN.md`'s "UI/UX
+      direction" design note, principle 6: curated metadata, not a flat
+      property dump; this is also the raw material principle 8's
+      setup-diff-aware comparison would consume, once `sde-setup` exists).
+      Left out for now as less immediately actionable: map length, rally
+      type/name, sky type, surface age, RSF launcher version — easy
+      follow-ons, not modeled as a gap since `ReplayInfo` already carries
+      them, just not surfaced in this status line yet.
 - [ ] Capture an RSF run on a *gravel/snow* stage and a different car, to check
       whether the 10^6 fixed-point field list holds beyond this one tarmac/Mini
       combination. Anna is capturing these separately. (The 1009-row pre-start
       window is no longer open: `totalSteps` = 5050 at the stage start in both
       runs, so the countdown is a fixed physics-tick count.)
-- [ ] Build install-root configuration + path discovery (see the design note
-      above). Prerequisite for anything that loads data outside `.sample-data/`,
-      and it supersedes the "how does replay metadata reach the app" question
-      below — pairing a `.ld` with its `.rpl`/`.ini` should go through resolved
-      paths, not a folder convention.
+- [x] **Install-root configuration + path discovery (2026-07-31)** — new
+      `sde_rbr::install` module (`crates/sde-formats/rbr/src/install.rs`,
+      UI-free per the design note above). `InstallConfig { root, overrides }`
+      resolves to `InstallPaths` (one field per row of the path table above:
+      NGP telemetry dir, `Telemetry.ini`, `RichardBurnsRally.ini`, `Replays\`,
+      `SavedGames\`, `Plugins\Pacenote\`, `rsfdata\cars\`, `Maps\`,
+      `RallySimFans.ini`, `rallysimfans_personal.ini`) — `PathOverrides` lets
+      any single path be redirected without affecting the others (e.g. a
+      telemetry folder relocated to another drive). `validate(&InstallPaths)
+      -> ValidationReport` checks every path against the filesystem and
+      reports *all* that are missing rather than stopping at the first one,
+      matching the design note's "report which expected paths are missing
+      rather than failing wholesale." `ValidationReport::root_looks_valid()`
+      narrows this to the two cheapest, most load-bearing markers
+      (`RichardBurnsRally.ini` + `Plugins\NGP\Telemetry.ini`) — an install
+      missing `Maps\` or an unconfigured `Plugins\Pacenote\` isn't "wrong
+      root," but missing both of those two almost certainly is. Also added
+      `read_ngp_settings(&InstallPaths) -> NgpSettings` (via the existing
+      `ini::Ini` reader, no new dependency) exposing `RichardBurnsRally.ini`'s
+      `[NGP]` `telemetryRecording`/`telemetryTics` keys — the design note's
+      "'telemetry recording is currently off' is a much better first-run
+      experience than an empty file list" is now backed by an actual reader.
+      Ten new unit tests (path resolution, per-path override isolation,
+      validation reporting every miss, root validity, NGP settings
+      happy/missing-key/missing-file paths) using real temp directories
+      rather than mocking the filesystem, consistent with this crate's
+      existing on-disk test style. *(UI wiring landed 2026-07-31 — see the
+      "UI wiring for install root / replay info" entry above: a "RBR install
+      root..." picker surfaces `validate()`/`read_ngp_settings()` as a status
+      line, and both "Open file..." and "Open replay info..." now default to
+      the relevant resolved folder.)* **Still not done:** no settings
+      screen (the install root isn't persisted across app restarts — it's
+      re-picked each session), and no auto-pairing of a loaded `.ld`/`.tsv`
+      with its matching `.rpl`/`.ini` (still two independent manual pickers,
+      per the note above — no known filename/folder convention to pair them
+      by).
 - [ ] Consider reading the NGP `.tsv` directly rather than the converted `.ld`,
       to recover `utcSystemTime` (absolute wall clock — the natural anchor for
       `sde-video` sync), `totalSteps`, and untruncated channel names.
-- [ ] Decide where the `.lsp` setup parser lives (`sde-formats::rbr`) and whether
-      to read the setup from the standalone file or the copy embedded in the
-      `.rpl` — the latter is self-describing and can't drift from the run.
+- [x] **Decide where the `.lsp` setup parser lives, and which copy to read
+      (2026-07-31):** lives in `sde-formats::rbr` (a new `setup.rs` module,
+      alongside `replay.rs` and `ini.rs`) — same crate as the other RBR/RSF
+      companion-file readers, per the workspace's per-sim adapter pattern.
+      **Read the standalone `.lsp` file, not the copy embedded in `.rpl`,
+      for the first implementation.** The embedded copy is more
+      self-describing (can't drift from the run it's paired with) but
+      extracting it means locating it inside the mostly-unreverse-engineered
+      `.rpl` binary body — the "RBR NGP telemetry format findings" section
+      above documents the embedded offset for exactly *one* observed file
+      (396376) with no confirmed rule for finding it in another, since the
+      surrounding `.rpl` layout itself isn't understood well enough yet to
+      derive that offset generally. The standalone `.lsp` needs no such
+      dependency: it's plain Lisp-style text at a fixed, already-parseable
+      shape (see "Install-path discovery" section above — 274 key/value pairs
+      over 15 sections, trailing empty-value duplicates to skip, three
+      trailing NULs on one sample file). Once `.rpl` decoding is itself a
+      real feature (not scoped yet), revisit reading the embedded copy as a
+      drift-check against the standalone file — the same
+      cross-validation spirit as this section's recovery-spot cross-check —
+      but that's a follow-on, not a blocker for a first `.lsp` parser. Not
+      implemented yet; this is the location/source decision only.
 - [ ] **Discrete-channel indicators (2026-07-27, scoped, not started):** source
       iRacing's official `irsdk_defines.h` (from the iRacing SDK download — not
       currently a local reference repo) for the real `irsdk_TrkLoc`/`irsdk_TrkSurf`/

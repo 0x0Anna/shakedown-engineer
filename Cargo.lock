@@ -4250,6 +4250,7 @@ version = "0.1.0"
 dependencies = [
  "rfd",
  "sde-core",
+ "sde-rbr",
  "slint",
  "slint-build",
 ]
