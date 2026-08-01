@@ -16,6 +16,9 @@
 //! - [`install`] — install-root path discovery/configuration: resolving
 //!   every location this app needs (telemetry, replays, setups, ...) from
 //!   one required install root, with per-path overrides and validation.
+//! - [`pairing`] — best-effort matching of a loaded telemetry file to the
+//!   replay `.ini` sidecar describing the same run, since RSF/NGP has no
+//!   shared filename/folder convention between the two.
 //!
 //! Planned (see PROJECT_PLAN.md's "RSF real-capture validation" section
 //! for the reverse-engineering notes): the `.lsp` setup sheet, the
@@ -32,6 +35,7 @@
 mod error;
 pub mod ini;
 pub mod install;
+pub mod pairing;
 pub mod replay;
 
 pub use error::RbrError;
@@ -40,6 +44,7 @@ pub use install::{
     read_ngp_settings, validate, InstallConfig, InstallPaths, MissingPath, NgpSettings,
     PathOverrides, ValidationReport,
 };
+pub use pairing::find_matching_replay_ini;
 pub use replay::{
     parse_replay_ini, parse_replay_ini_str, CarInfo, Conditions, RecoverySpot, ReplayInfo,
     ResultInfo, StageInfo, Versions,

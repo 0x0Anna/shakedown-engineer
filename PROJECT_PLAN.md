@@ -1410,6 +1410,71 @@ single-channel default; no other worksheet/dock plumbing changed, since
       color slot. Verified live: a freshly loaded shtep session's default
       three-panel view (`Speed_kmh`/`RPM`/`Throttle_pct`) now renders
       blue/orange/green respectively instead of all blue.
+      *(Bug found by independent code review, fixed 2026-08-01):* `comparing`
+      was computed as `ranges.len() > 1`, but a user can toggle on exactly
+      **one** compare chip (nothing stops them, and `refresh_compare_ui`'s
+      status text already special-cases "Comparing 1 lap" grammar), which
+      also yields exactly one range — so a single-lap comparison was
+      silently treated as the plain case, letting the color rotation
+      advance past dock 0 and desync every dock after the first from the
+      legend's single swatch (which always starts at color 0 for that one
+      lap). Fixed by keying `comparing` on `!state.compare_lap_indices.is_empty()`
+      instead of the range count — the actual selection state, not a
+      count that happens to coincide with it in the common multi-lap case.
+- [x] **Auto-locate the matching replay `.ini` (2026-08-01):** per Anna's
+      request, after testing "Open replay info..." and realizing she'd
+      expected it to auto-populate rather than need a second manual pick.
+      New `sde_rbr::pairing` module (`crates/sde-formats/rbr/src/
+      pairing.rs`) — `find_matching_replay_ini(telemetry_path, replays_dir)`
+      matches by modification-time proximity, since RSF/NGP has no shared
+      filename/folder convention between a `.ld`/`.tsv` and its `.rpl`/
+      `.ini` (confirmed no correlation between
+      `telemetry-NGP-Car_5-Mini JCW WRC-Stage_450-...` and
+      `Anna_rsf_hotlap_Gabiria-Legazpi 2004_...` filenames). Timing *is*
+      shared, though: checked real file mtimes from both sample captures
+      (`PROJECT_PLAN.md`'s "RSF real-capture validation" section) — each
+      run's `.ld` trails its own `.ini` by 6s and 41s respectively, while
+      the two different runs in that capture are ~7 minutes apart. A
+      180s tolerance window (comfortably above the largest observed gap,
+      comfortably below the inter-run gap) with nearest-match-wins is
+      therefore a workable heuristic, not a guarantee — flagged as such in
+      the doc comment, and still only as good as the real distribution of
+      gaps this was tuned against. Five unit tests using real
+      `std::fs::File::set_modified` temp files (closest-within-tolerance
+      picked over a further-but-still-in-range one matching the two real
+      runs' gaps, out-of-tolerance is `None`, non-`.ini` files ignored,
+      missing telemetry file/replays dir don't panic).
+      `sde-app`'s `load_file` now calls this automatically whenever
+      `install_paths` is set, replacing (not just adding to) whatever
+      `replay_info` a previous file load left behind — a stale replay
+      belongs to a different run and would otherwise silently mismatch (see
+      `AppState::replay_info`'s doc comment: reset on every successful
+      load, still preserved across a *failed* one). A new
+      `AppState::replay_auto_match_gap` records how tight the winning
+      match was, shown in the status line (`"Replay (auto-matched,
+      Δ40s): ..."`) so the user can judge confidence; `None` (and no
+      "(auto-matched, ...)" prefix) when `replay_info` came from the
+      manual "Open replay info..." button instead. Verified live against
+      the real install (`C:\Richard Burns Rally\Replays\` /
+      `Plugins\NGP\telemetry\`, not just `.sample-data/`): loading a real
+      `.ld` auto-matched its replay at `Δ40s` and displayed correctly.
+- [x] **Surface more of the replay `.ini`'s fields (2026-08-01):** the
+      replay status line (`refresh_replay_status` in `main.rs`) previously
+      showed only stage/car/driving-time. Per Anna's question about what
+      else is in `ReplayInfo`, added setup file name (`car.setup_name`,
+      last path segment only via a new `path_basename` helper — RSF's own
+      values use `\` regardless of host OS, so `Path::file_name` isn't
+      reliable here), surface/weather conditions
+      (`tyre_type`/`weather_type`/`surface_wetness`), and NGP physics
+      version (`versions.ngp`) — the fields that decide whether two runs
+      are *actually* comparable (matches `PROJECT_PLAN.md`'s "UI/UX
+      direction" design note, principle 6: curated metadata, not a flat
+      property dump; this is also the raw material principle 8's
+      setup-diff-aware comparison would consume, once `sde-setup` exists).
+      Left out for now as less immediately actionable: map length, rally
+      type/name, sky type, surface age, RSF launcher version — easy
+      follow-ons, not modeled as a gap since `ReplayInfo` already carries
+      them, just not surfaced in this status line yet.
 - [ ] Capture an RSF run on a *gravel/snow* stage and a different car, to check
       whether the 10^6 fixed-point field list holds beyond this one tarmac/Mini
       combination. Anna is capturing these separately. (The 1009-row pre-start

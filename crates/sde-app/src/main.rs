@@ -75,11 +75,22 @@ struct AppState {
     /// root has been set yet, so those dialogs just open wherever the OS
     /// defaults to.
     install_paths: Option<sde_rbr::InstallPaths>,
-    /// The most recently loaded replay `.rpl`/`.ini` sidecar, if any (see
-    /// `on_open_replay_info`). Independent of `session` — loading a new
-    /// telemetry file doesn't clear this, since the same replay info stays
-    /// relevant until the user picks a different one.
+    /// The replay `.rpl`/`.ini` sidecar describing the currently loaded
+    /// telemetry file, if any — either picked manually (see
+    /// `on_open_replay_info`) or auto-matched by modification time against
+    /// `install_paths.replays_dir` when a new file loads (see `load_file`,
+    /// `sde_rbr::find_matching_replay_ini`). Reset on every *successful*
+    /// new file load (whether or not a match was found — a previous
+    /// file's replay info would otherwise silently describe the wrong
+    /// run) but preserved across a *failed* load, same as `install_paths`
+    /// — see `load_file`'s failure-path comment.
     replay_info: Option<sde_rbr::ReplayInfo>,
+    /// How far apart (in time) the auto-matched replay's modification time
+    /// was from the loaded telemetry file's, for display in
+    /// `refresh_replay_status` — `None` when `replay_info` came from a
+    /// manual "Open replay info..." pick instead, or wasn't auto-matched
+    /// at all.
+    replay_auto_match_gap: Option<std::time::Duration>,
     all_channel_names: Vec<String>,
     filter_text: String,
     /// Worksheet docks, in display order. Each dock overlays one or more
@@ -276,7 +287,10 @@ fn main() -> Result<(), slint::PlatformError> {
 
             match sde_rbr::parse_replay_ini(&path) {
                 Ok(replay) => {
-                    state.borrow_mut().replay_info = Some(replay);
+                    let mut state_mut = state.borrow_mut();
+                    state_mut.replay_info = Some(replay);
+                    // A manual pick, not an auto-match.
+                    state_mut.replay_auto_match_gap = None;
                 }
                 Err(e) => {
                     window.set_replay_status_text(format!("Error loading replay info: {e}").into());
@@ -943,12 +957,34 @@ fn refresh_axis_ui(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     window.set_axis_distance_available(distance_available);
 }
 
+/// Best-effort last path segment of a Windows-style path string. RSF's own
+/// `.ini` values (e.g. `car.setup_name`) always use `\` regardless of the
+/// host OS, so this can't just be `Path::file_name`. Falls back to the
+/// whole string if there's no separator.
+fn path_basename(value: &str) -> &str {
+    value.rsplit(['\\', '/']).next().unwrap_or(value)
+}
+
 /// Push a summary of the currently loaded replay `.rpl`/`.ini` sidecar
-/// (stage/car/driving-time) into the window, plus a recovery-spot
-/// cross-check against the currently loaded telemetry session if one is
-/// loaded too (see `replay_check::cross_check_recoveries`). Called after
-/// loading a replay `.ini` and after loading a telemetry file (since either
-/// one changing affects whether/what cross-check runs).
+/// into the window — stage, car, setup used, surface/weather conditions,
+/// NGP physics version, and driving time, plus a recovery-spot cross-check
+/// against the currently loaded telemetry session if one is loaded too
+/// (see `replay_check::cross_check_recoveries`). Called after loading a
+/// replay `.ini` (manually, or auto-matched by `load_file`) and after
+/// loading a telemetry file (since either one changing affects
+/// whether/what cross-check runs).
+///
+/// These particular fields were picked because they're what decides
+/// whether two runs are actually comparable (setup, conditions, physics
+/// version) or just look like they are (same stage/car) — see
+/// `PROJECT_PLAN.md`'s "UI/UX direction" design note, principle 6 (curated
+/// metadata over a flat property dump) and principle 8 (setup-diff-aware
+/// comparison, not yet built, but this is the raw material for it).
+/// `ReplayInfo` has more fields than are shown here (map length, rally
+/// type/name, sky type, surface age, RSF version, ...) — left out for now
+/// as less immediately actionable than what's here; nothing stops adding
+/// them later, `ReplayInfo::extra` isn't needed since these are all
+/// already-modeled fields.
 fn refresh_replay_status(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     let state = state.borrow();
     let Some(replay) = state.replay_info.as_ref() else {
@@ -963,10 +999,36 @@ fn refresh_replay_status(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     if let Some(model) = &replay.car.model {
         parts.push(format!("Car: {model}"));
     }
+    if let Some(setup) = &replay.car.setup_name {
+        parts.push(format!("Setup: {}", path_basename(setup)));
+    }
+    let conditions: Vec<&str> = [
+        replay.conditions.tyre_type.as_deref(),
+        replay.conditions.weather_type.as_deref(),
+        replay.conditions.surface_wetness.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !conditions.is_empty() {
+        parts.push(format!("Conditions: {}", conditions.join("/")));
+    }
+    if let Some(ngp) = &replay.versions.ngp {
+        parts.push(format!("NGP {ngp}"));
+    }
     if let Some(driving_time) = replay.driving_time_secs() {
         parts.push(format!("Driving time: {driving_time:.1}s"));
     }
-    let mut text = format!("Replay: {}", parts.join(" | "));
+
+    // Distinguishes an auto-matched pairing (a heuristic — see
+    // `sde_rbr::find_matching_replay_ini`) from a manual "Open replay
+    // info..." pick, and shows how tight the match was so the user can
+    // judge how much to trust it.
+    let prefix = state.replay_auto_match_gap.map_or_else(
+        || "Replay".to_string(),
+        |gap| format!("Replay (auto-matched, Δ{}s)", gap.as_secs()),
+    );
+    let mut text = format!("{prefix}: {}", parts.join(" | "));
 
     if let Some(session) = state.session.as_ref() {
         let check = replay_check::cross_check_recoveries(session, replay);
@@ -1014,9 +1076,11 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
                 let mut state_mut = state.borrow_mut();
                 let install_paths = state_mut.install_paths.take();
                 let replay_info = state_mut.replay_info.take();
+                let replay_auto_match_gap = state_mut.replay_auto_match_gap.take();
                 *state_mut = AppState {
                     install_paths,
                     replay_info,
+                    replay_auto_match_gap,
                     ..AppState::default()
                 };
             }
@@ -1048,6 +1112,25 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
     let compare_lap_labels: Vec<String> = (1..=session.laps.len()).map(|n| n.to_string()).collect();
     let default_dock_channels = graph::default_dock_channels(&session);
 
+    // Best-effort auto-pair with the replay `.ini` describing this same
+    // run (see `sde_rbr::find_matching_replay_ini` — matched by
+    // modification-time proximity, since RSF/NGP has no shared filename
+    // convention between telemetry and replay files). Computed before the
+    // state borrow below so this immutable borrow doesn't overlap with
+    // the mutable one that follows. `None` (no install root set, or no
+    // `.ini` within tolerance) just means the worksheet loads without
+    // replay context, not an error.
+    let auto_replay = state
+        .borrow()
+        .install_paths
+        .as_ref()
+        .and_then(|paths| sde_rbr::find_matching_replay_ini(path, &paths.replays_dir))
+        .and_then(|(ini_path, gap)| {
+            sde_rbr::parse_replay_ini(&ini_path)
+                .ok()
+                .map(|info| (info, gap))
+        });
+
     {
         let mut state = state.borrow_mut();
         state.session = Some(session);
@@ -1059,6 +1142,11 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
         state.compare_lap_indices.clear();
         state.math_channel_names.clear();
         state.zoom = None;
+        // Replay info describes exactly one telemetry file, so it's reset
+        // on every new (successful) load — see the field's doc comment —
+        // then repopulated here if auto-pairing found a match.
+        state.replay_auto_match_gap = auto_replay.as_ref().map(|(_, gap)| *gap);
+        state.replay_info = auto_replay.map(|(info, _)| info);
         state.axis_mode = graph::AxisMode::Time;
         state.session_generation += 1;
     }
@@ -1137,10 +1225,17 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     // the two would desync a dock's trace color from what the shared
     // legend says it means, so only the plain case rotates a color per
     // dock/channel here; comparison mode keeps starting each dock fresh at
-    // color 0 to line up with that legend. `ranges.len()` is the same for
-    // every dock in this call (computed once, above), so this is decided
-    // once rather than per dock.
-    let comparing = ranges.len() > 1;
+    // color 0 to line up with that legend.
+    //
+    // Deliberately keyed on `compare_lap_indices` being non-empty, *not*
+    // `ranges.len() > 1`: a single lap can be "compared" (the compare-chip
+    // UI has nothing stopping a user from toggling on just one, and
+    // `refresh_compare_ui`'s status text already special-cases "Comparing
+    // 1 lap"), which yields exactly one range — `ranges.len() > 1` would
+    // read that as the plain case and let the color rotation advance past
+    // dock 0, desyncing every dock after the first from the legend's
+    // single swatch (which always starts at color 0 for that one lap).
+    let comparing = !state.compare_lap_indices.is_empty();
     // Oscilloscope-style: each successive dock/channel gets the next
     // color in the palette rather than every single-channel dock
     // restarting at color 0 (which made every dock the same blue). Only
