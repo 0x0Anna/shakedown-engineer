@@ -7,3 +7,4 @@
 //! `main.rs`.
 
 pub mod graph;
+pub mod replay_check;

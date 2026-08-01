@@ -1298,16 +1298,40 @@ single-channel default; no other worksheet/dock plumbing changed, since
       file. Tested with verbatim inline copies of both sample sidecars, plus an
       on-disk test that runs against `.sample-data/` when present and skips
       cleanly in CI.
-- [ ] Decide how replay metadata reaches the app. `Session` is telemetry-shaped
-      and `sde-core` deliberately doesn't depend on `sde-rbr`; pairing a `.ld`
-      with its `.ini` also can't rely on the folder layout in `.sample-data/`
-      (that's a hand-made capture convention, not RSF's own). Probably belongs
-      in `sde-app` or a small session-assembly layer, not in `sde-core`.
-- [ ] Cross-check `ReplayInfo::recovery_spots` against
-      `Session::time_penalties` on load — counts should match, and each
-      `position_m` should agree with the stage distance at the corresponding
-      penalty. Cheap, and it validates that a `.ld` and a `.rpl` describe the
-      same run.
+- [x] **Decide how replay metadata reaches the app (2026-07-31):** `sde-app`
+      is the pairing point, confirmed by implementing the next item there —
+      it's the one crate allowed to depend on both `sde-core` (for `Session`)
+      and `sde-rbr` (for `ReplayInfo`) without violating `sde-core`'s
+      deliberate non-dependency on `sde-rbr`. Added `sde-rbr` as an `sde-app`
+      dependency. **Still open:** actually locating a `Session`'s matching
+      `.ini` (auto-pairing by filename/folder convention, vs. a second manual
+      file picker) is blocked on the install-root path-discovery item below —
+      `.sample-data/`'s per-run folder shape is a hand-made capture
+      convention, not something RSF itself guarantees, so no pairing
+      heuristic should be built against it. No UI wiring (a second "Open
+      replay..." picker, a results panel) has been added yet either; only the
+      pure cross-check logic below, which is UI-independent.
+- [x] **Cross-check `ReplayInfo::recovery_spots` against
+      `Session::time_penalties` (2026-07-31):** new `sde_app::replay_check`
+      module (`crates/sde-app/src/replay_check.rs`, Slint-free and unit
+      tested independent of any UI) — `cross_check_recoveries(&Session,
+      &ReplayInfo) -> RecoveryCrossCheck` pairs the two lists by
+      chronological order (both are already ordered — recovery spots by file
+      position, time penalties by timecode) rather than by nearest position,
+      since matching by position is exactly what this validates, not an
+      assumption to bake in. Reports whether the counts match, and per pair,
+      whether the replay's recorded `position_m` agrees (within a 50 m
+      `POSITION_TOLERANCE_M`, generous because the replay's position is where
+      the recovery prompt was accepted, not the exact stage-clock jump point)
+      with the session's distance channel evaluated at the telemetry
+      penalty's timecode (via `sde_app::graph::value_at`, reused rather than
+      re-implemented). A session with no distance channel reports `None` for
+      that comparison — uninformative, not a mismatch, so
+      `RecoveryCrossCheck::looks_consistent()` still passes rather than
+      penalizing formats/sessions that never had a distance channel to begin
+      with. Not yet wired into any UI or the actual load path (no code calls
+      this today outside its own tests) — that's the file-pairing question
+      above, still blocked on install-root discovery.
 - [ ] Capture an RSF run on a *gravel/snow* stage and a different car, to check
       whether the 10^6 fixed-point field list holds beyond this one tarmac/Mini
       combination. Anna is capturing these separately. (The 1009-row pre-start
@@ -1321,9 +1345,28 @@ single-channel default; no other worksheet/dock plumbing changed, since
 - [ ] Consider reading the NGP `.tsv` directly rather than the converted `.ld`,
       to recover `utcSystemTime` (absolute wall clock — the natural anchor for
       `sde-video` sync), `totalSteps`, and untruncated channel names.
-- [ ] Decide where the `.lsp` setup parser lives (`sde-formats::rbr`) and whether
-      to read the setup from the standalone file or the copy embedded in the
-      `.rpl` — the latter is self-describing and can't drift from the run.
+- [x] **Decide where the `.lsp` setup parser lives, and which copy to read
+      (2026-07-31):** lives in `sde-formats::rbr` (a new `setup.rs` module,
+      alongside `replay.rs` and `ini.rs`) — same crate as the other RBR/RSF
+      companion-file readers, per the workspace's per-sim adapter pattern.
+      **Read the standalone `.lsp` file, not the copy embedded in `.rpl`,
+      for the first implementation.** The embedded copy is more
+      self-describing (can't drift from the run it's paired with) but
+      extracting it means locating it inside the mostly-unreverse-engineered
+      `.rpl` binary body — the "RBR NGP telemetry format findings" section
+      above documents the embedded offset for exactly *one* observed file
+      (396376) with no confirmed rule for finding it in another, since the
+      surrounding `.rpl` layout itself isn't understood well enough yet to
+      derive that offset generally. The standalone `.lsp` needs no such
+      dependency: it's plain Lisp-style text at a fixed, already-parseable
+      shape (see "Install-path discovery" section above — 274 key/value pairs
+      over 15 sections, trailing empty-value duplicates to skip, three
+      trailing NULs on one sample file). Once `.rpl` decoding is itself a
+      real feature (not scoped yet), revisit reading the embedded copy as a
+      drift-check against the standalone file — the same
+      cross-validation spirit as this section's recovery-spot cross-check —
+      but that's a follow-on, not a blocker for a first `.lsp` parser. Not
+      implemented yet; this is the location/source decision only.
 - [ ] **Discrete-channel indicators (2026-07-27, scoped, not started):** source
       iRacing's official `irsdk_defines.h` (from the iRacing SDK download — not
       currently a local reference repo) for the real `irsdk_TrkLoc`/`irsdk_TrkSurf`/
