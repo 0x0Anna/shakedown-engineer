@@ -3,11 +3,16 @@ name = "sde-cli"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "CLI example proving the sde-motec parser -> sde-core data model boundary"
+description = "CLI examples proving the sde-formats parsers -> sde-core / sde-setup data model boundaries"
 
 [[bin]]
 name = "dump_channels"
 path = "src/main.rs"
 
+[[bin]]
+name = "diff_setups"
+path = "src/bin/diff_setups.rs"
+
 [dependencies]
 sde-core = { path = "../sde-core" }
+sde-setup = { path = "../sde-setup" }

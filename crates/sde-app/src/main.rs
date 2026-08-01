@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use slint::ComponentHandle;
 
-use sde_app::{graph, replay_check};
+use sde_app::{graph, replay_check, setup_view};
 
 slint::include_modules!();
 
@@ -91,6 +91,15 @@ struct AppState {
     /// manual "Open replay info..." pick instead, or wasn't auto-matched
     /// at all.
     replay_auto_match_gap: Option<std::time::Duration>,
+    /// The `.lsp` setup sheet the loaded run used — auto-resolved from
+    /// `replay_info`'s `SetupName` against `install_paths` on every load
+    /// (see `refresh_setup_panel`), or picked manually via "Open
+    /// setup...". Reset alongside `replay_info` for the same reason: a
+    /// previous run's setup would silently describe the wrong car.
+    setup: Option<sde_setup::Setup>,
+    /// A second setup picked via "Compare...", diffed against `setup`.
+    /// `None` means the panel shows the single sheet instead.
+    setup_compare: Option<sde_setup::Setup>,
     all_channel_names: Vec<String>,
     filter_text: String,
     /// Worksheet docks, in display order. Each dock overlays one or more
@@ -208,6 +217,10 @@ fn main() -> Result<(), slint::PlatformError> {
         apply_install_root(&window, &state, root);
     }
 
+    // So the (hidden by default) setup panel opens onto its empty-state
+    // guidance rather than a blank column before any file is loaded.
+    refresh_setup_panel(&window, &state);
+
     {
         let window_weak = window.as_weak();
         let state = state.clone();
@@ -298,6 +311,68 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
             }
             refresh_replay_status(&window, &state);
+
+            // A different replay means a different run, so its setup takes
+            // over — but only if one actually resolves. Failing to find it
+            // leaves whatever the panel had (possibly a manually opened
+            // sheet), rather than clearing the panel as a side effect of
+            // picking a replay.
+            if let Some(setup) = auto_resolve_setup(&state) {
+                let mut state_mut = state.borrow_mut();
+                state_mut.setup = Some(setup);
+                state_mut.setup_compare = None;
+            }
+            refresh_setup_panel(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_open_setup(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(setup) = pick_setup(&state, "Open a car setup (.lsp)") else {
+                return;
+            };
+            {
+                let mut state_mut = state.borrow_mut();
+                state_mut.setup = Some(setup);
+                // A newly picked *primary* setup invalidates any active
+                // comparison — the pair the user set up was between two
+                // specific sheets, and silently re-pointing one half of it
+                // would show a diff they never asked for.
+                state_mut.setup_compare = None;
+            }
+            refresh_setup_panel(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_compare_setup(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(setup) = pick_setup(&state, "Compare against a car setup (.lsp)") else {
+                return;
+            };
+            state.borrow_mut().setup_compare = Some(setup);
+            refresh_setup_panel(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_setup_comparison_cleared(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            state.borrow_mut().setup_compare = None;
+            refresh_setup_panel(&window, &state);
         });
     }
 
@@ -1046,6 +1121,104 @@ fn refresh_replay_status(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     window.set_replay_status_text(text.into());
 }
 
+/// Show a file picker for a `.lsp` setup and load it, defaulting to the
+/// install's `SavedGames\` folder when a root is set. `None` if the user
+/// cancelled *or* the file didn't load — a bad pick leaves the panel
+/// showing whatever it already had rather than blanking it.
+fn pick_setup(state: &Rc<RefCell<AppState>>, title: &str) -> Option<sde_setup::Setup> {
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("RBR car setup", &["lsp"])
+        .set_title(title);
+    if let Some(dir) = state
+        .borrow()
+        .install_paths
+        .as_ref()
+        .map(|p| p.saved_games_dir.clone())
+    {
+        dialog = dialog.set_directory(dir);
+    }
+    let path = dialog.pick_file()?;
+    sde_setup::rbr::load_lsp(&path).ok()
+}
+
+/// Push the setup panel's contents into the window: the whole sheet, or
+/// only what differs once a comparison setup is picked.
+///
+/// Per PROJECT_PLAN.md's UI/UX design note, principle 8 — a performance
+/// comparison next to *what actually changed between the two setups* is
+/// the differentiated feature here, so the diff view is the one the panel
+/// switches to as soon as there's a second setup to show.
+fn refresh_setup_panel(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
+    let state = state.borrow();
+
+    let (title, subtitle, rows, comparing) = match (&state.setup, &state.setup_compare) {
+        (Some(left), Some(right)) => {
+            let diff = sde_setup::diff(left, right);
+            let subtitle = if diff.is_empty() {
+                "Identical — no values differ.".to_string()
+            } else {
+                format!("{} values differ", diff.change_count())
+            };
+            (
+                format!("{} → {}", left.name, right.name),
+                subtitle,
+                setup_view::rows_for_diff(&diff),
+                true,
+            )
+        }
+        (Some(setup), None) => (
+            setup.name.clone(),
+            format!(
+                "{} values in {} groups — {}",
+                setup.entry_count(),
+                setup.groups.len(),
+                setup.source
+            ),
+            setup_view::rows_for_setup(setup),
+            false,
+        ),
+        (None, _) => (
+            "Setup".to_string(),
+            "No setup loaded. Set an RBR install root and load a run to \
+             resolve its setup automatically, or open one directly."
+                .to_string(),
+            Vec::new(),
+            false,
+        ),
+    };
+
+    window.set_setup_panel_title(title.into());
+    window.set_setup_panel_subtitle(subtitle.into());
+    window.set_setup_comparing(comparing);
+    window.set_setup_rows(slint::ModelRc::new(slint::VecModel::from(
+        rows.into_iter()
+            .map(|row| SetupRowData {
+                is_group: row.is_group,
+                label: row.label.into(),
+                value: row.value.into(),
+                detail: row.detail.into(),
+            })
+            .collect::<Vec<_>>(),
+    )));
+}
+
+/// Resolve the `.lsp` the currently loaded replay names, if any. Needs
+/// both an install root (to resolve RSF's install-relative `SetupName`)
+/// and a loaded replay `.ini`; a missing or unreadable file just means no
+/// setup, not an error worth surfacing over the telemetry itself.
+fn auto_resolve_setup(state: &Rc<RefCell<AppState>>) -> Option<sde_setup::Setup> {
+    let state = state.borrow();
+    let paths = state.install_paths.as_ref()?;
+    let setup_name = state.replay_info.as_ref()?.car.setup_name.as_ref()?;
+    let path = setup_view::resolve_setup_path(paths, setup_name)?;
+    let mut setup = sde_setup::rbr::load_lsp(&path).ok()?;
+    // The `.lsp` itself carries no car identity (it's implied by the
+    // folder it lives in) — the replay does, so fill it in here where
+    // both are in hand.
+    setup.car.clone_from(&state.replay_info.as_ref()?.car.model);
+    Some(setup)
+}
+
 fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
     let file_name = path.file_name().map_or_else(
         || path.to_string_lossy().to_string(),
@@ -1077,10 +1250,16 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
                 let install_paths = state_mut.install_paths.take();
                 let replay_info = state_mut.replay_info.take();
                 let replay_auto_match_gap = state_mut.replay_auto_match_gap.take();
+                // The setup belongs to the replay, so it's preserved on
+                // exactly the same terms.
+                let setup = state_mut.setup.take();
+                let setup_compare = state_mut.setup_compare.take();
                 *state_mut = AppState {
                     install_paths,
                     replay_info,
                     replay_auto_match_gap,
+                    setup,
+                    setup_compare,
                     ..AppState::default()
                 };
             }
@@ -1151,6 +1330,18 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
         state.session_generation += 1;
     }
 
+    // Resolve this run's setup sheet from the replay info just loaded.
+    // Separate borrow because `auto_resolve_setup` reads the state it
+    // depends on (the borrow above is still held at that point).
+    let auto_setup = auto_resolve_setup(state);
+    {
+        let mut state = state.borrow_mut();
+        state.setup = auto_setup;
+        // A comparison pairs two specific sheets; the left one just
+        // changed, so the pairing no longer means what the user set up.
+        state.setup_compare = None;
+    }
+
     window.set_window_title(format!("sde-app — {file_name}").into());
     window
         .set_status_text("No channels added to the worksheet yet — click one on the left.".into());
@@ -1168,6 +1359,7 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
     refresh_compare_ui(window, state);
     refresh_zoom_ui(window, state);
     refresh_axis_ui(window, state);
+    refresh_setup_panel(window, state);
     replot(window, state);
 }
 

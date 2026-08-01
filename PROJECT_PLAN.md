@@ -64,7 +64,10 @@ crates/
 │   ├── rbr/               # RBR/RSF companion files — STARTED (`sde-rbr`).
 │   │                      #   ini.rs     — shared minimal INI reader
 │   │                      #   replay.rs  — replay metadata .ini sidecar (DONE)
-│   │                      #   todo: .lsp setup sheet, pacenote .ini, .rpl frames
+│   │                      #   install.rs — install-root path discovery (DONE)
+│   │                      #   pairing.rs — telemetry <-> replay matching (DONE)
+│   │                      #   setup.rs   — .lsp setup sheet (DONE)
+│   │                      #   todo: pacenote .ini, .rpl frames
 │   └── dirt_rally/, acr/, ea_wrc/         # per-sim SETUP FILE adapters
 │                                            # (read each sim's own install-dir car/track/
 │                                            #  setup files, map into sde-setup's model —
@@ -77,10 +80,12 @@ crates/
 │                          # engine, interpolation/resampling, metadata DB cache (sqlite)
 │                          # — depends on sde-formats, UI-free
 │
-├── sde-setup/             # NEW (race-engineer feature): sim-agnostic setup sheet model —
-│                          # springs, dampers, ARBs, ride height, diff, gearing, tire
-│                          # pressures/compounds. Versioned and diffable per stage.
-│                          # Populated either manually or via sde-formats::<sim> adapters.
+├── sde-setup/             # DONE (race-engineer feature, milestone 6): sim-agnostic setup
+│                          # sheet model + diff engine. Ordered named groups of named
+│                          # entries rather than a fixed springs/dampers/ARBs struct, so
+│                          # each sim's own sheet shape survives. Per-sim adapters live
+│                          # here (sde_setup::rbr) reading sde-formats::<sim> parsers,
+│                          # keeping the format crates leaf dependencies.
 │
 ├── sde-analysis/          # NEW (race-engineer feature): derived-channel analysis —
 │                          # damper velocity histograms, ABS/TC intervention markers +
@@ -770,7 +775,57 @@ Subaru_WRX_STI/*.ibt`) before writing any Rust:
      other axis's input is discarded outright" — so off-axis jitter can't
      leak through even partially.
 6. **`sde-setup`** — setup sheet data model + diff view between two setups. First
-   genuinely new (non-port) feature.
+   genuinely new (non-port) feature. *(Done, 2026-08-01 — see
+   `crates/sde-setup`, `crates/sde-formats/rbr/src/setup.rs`,
+   `crates/sde-app/src/setup_view.rs`.)* Four pieces:
+   - **`.lsp` parser** (`sde_rbr::setup`, the location decided in the open-task
+     entry below): an s-expression tokenizer rather than a line reader, so the
+     copy embedded in a `.rpl` parses the same way if that's ever pursued.
+     Handles the two real quirks — every section repeats its key list as a
+     value-less trailer (a key with no values *is* the trailer marker, and is
+     dropped), and `vecTopMountPosition` carries three values, so an entry
+     holds a list. Number atoms are recognized narrowly (leading digit after an
+     optional sign) rather than via `f64::from_str`, which would otherwise
+     swallow a key spelled `inf`/`NaN` as a value of the entry before it.
+   - **Sim-agnostic model** (`sde_setup::{Setup, SetupGroup, SetupEntry,
+     SetupValue}`): ordered named groups of named entries, *not* a fixed
+     struct of springs/dampers/ARBs. Every sim exposes a different subset of
+     adjustments under different names; a fixed schema would either discard
+     what doesn't fit or force adapters to invent values they don't have.
+     Ordered groups also preserve each sim's own sheet layout — the one its
+     users already know — while still giving the diff a stable key to match on.
+   - **Diff** (`sde_setup::diff`): keeps only what differs, matched by key
+     within a group (never by position — two sheets from different plugin
+     versions can carry different entry counts), reporting one-sided entries
+     rather than dropping them. `percent_change` divides by the left value's
+     *magnitude* so its sign agrees with the delta for negative quantities
+     (`WheelAxisInclination` -0.057 -> -0.070 is a -22% change, not +22%).
+   - **RBR adapter** (`sde_setup::rbr`), living in `sde-setup` rather than
+     `sde-rbr` so the format crates stay leaf dependencies — the same direction
+     `sde-core` sits in relative to the telemetry parsers. Prettifies RBR's
+     `CamelCase` keys (`"BumpStopStiffnessRear_NGP"` -> `"Bump Stop Stiffness
+     Rear (NGP)"`, corner markers like `LF`/`RB` kept whole) and attaches units
+     only where the captures confirm them (N/m, Pa, Ns/m, Nm, m). The angles
+     and the ratio-like NGP values are deliberately left unlabelled: their
+     magnitudes are *consistent* with radians and 0..1 ratios, but nothing
+     confirms it, and a wrong unit on a setup sheet is worse than no unit.
+   - **Surfaces**: `sde-cli` gained a `diff_setups` binary (one path prints the
+     sheet, two print the diff with percentages), and `sde-app` a "Setup"
+     panel — the loaded run's sheet, auto-resolved from the replay `.ini`'s
+     `SetupName` against the install root (`sde_app::setup_view::
+     resolve_setup_path`, which splits RSF's Windows-style relative path on
+     both separators and also tries a relocated `saved_games_dir`), plus
+     "Open setup..." / "Compare..." pickers that switch the panel to showing
+     only what differs. This is the first half of the design note's principle 8
+     (setup-diff-aware comparison); pairing it with a *performance* delta trace
+     is still to come, and needs the comparison to span two loaded sessions
+     rather than one.
+   - **Correction to an earlier note:** the "Install-path discovery" section
+     below says the two sample setups differ in "58 values in all". That was an
+     undercount — the real figure is **73**, confirmed both by this parser and
+     independently by a plain line diff of the two files. The other figures in
+     that note (274 key/value pairs, 15 sections — 16 by this parser's count,
+     which excludes the document's own `"CarSetup"` wrapper) hold.
 7. **`sde-analysis`** — derived channels layered onto graphs: damper velocity
    histograms, ABS/TC intervention markers + stats, ride-height/roll estimates,
    brake bias effectiveness. This is where the race-engineer motivation pays off.
@@ -1041,7 +1096,7 @@ Also worth recording from the same investigation, none of it implemented yet:
 - **Setup `.lsp`** is a Lisp-style s-expression, 274 key/value pairs over 15
   sections, and diffs cleanly between the two runs (front springs 26000 ->
   45500 N/m, ARB 16000 -> 21000, brake pressure 4.0 -> 6.14 MPa, 58 values in
-  all). Two parsing quirks: each section repeats its key list with *empty*
+  all — **the count is wrong, it's 73**; see the correction under milestone 6). Two parsing quirks: each section repeats its key list with *empty*
   values as a trailer (skip any key not followed by a numeric), and
   `vecTopMountPosition` carries three. Run1's file has three trailing NUL bytes.
   Values tie directly to telemetry — `TyreLF.Pressure 195000` equals the
@@ -1539,8 +1594,11 @@ single-channel default; no other worksheet/dock plumbing changed, since
       real feature (not scoped yet), revisit reading the embedded copy as a
       drift-check against the standalone file — the same
       cross-validation spirit as this section's recovery-spot cross-check —
-      but that's a follow-on, not a blocker for a first `.lsp` parser. Not
-      implemented yet; this is the location/source decision only.
+      but that's a follow-on, not a blocker for a first `.lsp` parser.
+      *(Implemented 2026-08-01 exactly as decided here — `sde_rbr::setup`
+      reads the standalone file; see milestone 6 above for the parser's
+      design and the two file quirks it handles. The `.rpl`-embedded copy
+      remains untouched.)*
 - [ ] **Discrete-channel indicators (2026-07-27, scoped, not started):** source
       iRacing's official `irsdk_defines.h` (from the iRacing SDK download — not
       currently a local reference repo) for the real `irsdk_TrkLoc`/`irsdk_TrkSurf`/

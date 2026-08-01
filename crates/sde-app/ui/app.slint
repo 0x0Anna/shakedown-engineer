@@ -38,6 +38,17 @@ export struct DockData {
     grid-col: int,
 }
 
+// One line in the setup panel: either a group header or a value/diff row.
+// Flat rather than nested because that's what a `ListView` consumes — see
+// `setup_view::SetupRow`.
+export struct SetupRowData {
+    is-group: bool,
+    label: string,
+    value: string,
+    // Percentage change on a diff row; empty otherwise.
+    detail: string,
+}
+
 export struct LegendEntry {
     label: string,
     color: color,
@@ -213,6 +224,11 @@ export component AppWindow inherits Window {
     in property <bool> axis-distance-available: false; // whether the loaded session has a distance channel
     in property <string> install-status-text: ""; // RBR install root validation summary; "" until one is set
     in property <string> replay-status-text: ""; // loaded .rpl/.ini metadata + recovery cross-check summary
+    in property <[SetupRowData]> setup-rows: []; // the setup sheet, or only what differs while comparing
+    in property <string> setup-panel-title: ""; // e.g. "Tarmac Bumpy" or "Tarmac Bumpy -> my tarmac test"
+    in property <string> setup-panel-subtitle: ""; // e.g. "274 values" / "73 values differ"
+    in property <bool> setup-comparing: false; // whether `setup-rows` is a diff rather than one sheet
+    in-out property <bool> setup-panel-visible: false; // pure UI state: whether the panel is shown at all
 
     // -- callbacks into Rust --
     callback open-file();
@@ -233,6 +249,9 @@ export component AppWindow inherits Window {
     callback zoom-scrolled(float, float, float); // delta-x, delta-y, cursor fraction
     callback zoom-reset();
     callback axis-mode-toggled(); // flips between Time and Distance
+    callback open-setup(); // pick a .lsp to show as the current run's setup
+    callback compare-setup(); // pick a .lsp to diff the current setup against
+    callback setup-comparison-cleared(); // back to showing the single sheet
 
     VerticalBox {
         padding: 10px;
@@ -252,6 +271,27 @@ export component AppWindow inherits Window {
             Button {
                 text: "Open replay info...";
                 clicked => { root.open-replay-info(); }
+            }
+            // Pure UI state (like `layout-mode`): showing/hiding the panel
+            // doesn't change what's loaded, so it needs no Rust round-trip.
+            // Hand-rolled toggle rather than a checkable `Button`, for the
+            // same binding-severing reason documented on the layout chips.
+            Rectangle {
+                width: 60px;
+                height: 24px;
+                background: root.setup-panel-visible ? #4ea1ff : #2a2f3a;
+                border-radius: 3px;
+                TouchArea {
+                    clicked => { root.setup-panel-visible = !root.setup-panel-visible; }
+                }
+                Text {
+                    text: "Setup";
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
+                }
             }
             Text {
                 text: root.window-title;
@@ -688,6 +728,88 @@ export component AppWindow inherits Window {
                     // prefix and unit), since which is shown depends on
                     // `axis-mode-label`.
                     text: root.cursor-visible ? root.cursor-time-text : "";
+                }
+            }
+
+            // Setup panel: the loaded run's `.lsp` sheet, or — once a
+            // second setup is picked to compare against — only the values
+            // that differ between them. Milestone 6 / the UI-UX design
+            // note's principle 8 (setup-diff-aware comparison).
+            if root.setup-panel-visible: VerticalBox {
+                padding: 0px;
+                spacing: 4px;
+                width: 340px;
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: root.setup-panel-title != "" ? root.setup-panel-title : "Setup";
+                        font-size: 13px;
+                        font-weight: 600;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                }
+                if root.setup-panel-subtitle != "": Text {
+                    text: root.setup-panel-subtitle;
+                    font-size: 11px;
+                    color: gray;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Button {
+                        text: "Open setup...";
+                        clicked => { root.open-setup(); }
+                    }
+                    if !root.setup-comparing: Button {
+                        text: "Compare...";
+                        clicked => { root.compare-setup(); }
+                    }
+                    if root.setup-comparing: Button {
+                        text: "Stop comparing";
+                        clicked => { root.setup-comparison-cleared(); }
+                    }
+                }
+
+                ListView {
+                    vertical-stretch: 1;
+                    for row in root.setup-rows: Rectangle {
+                        height: row.is-group ? 24px : 20px;
+                        background: row.is-group ? #2a3040 : transparent;
+                        HorizontalLayout {
+                            padding-left: 4px;
+                            padding-right: 4px;
+                            spacing: 6px;
+                            Text {
+                                text: row.label;
+                                font-size: row.is-group ? 12px : 11px;
+                                font-weight: row.is-group ? 600 : 400;
+                                color: row.is-group ? #4ea1ff : white;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                            if !row.is-group: Text {
+                                text: row.value;
+                                font-size: 11px;
+                                color: root.setup-comparing ? #ffb060 : gray;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                                overflow: elide;
+                            }
+                            if row.detail != "": Text {
+                                text: row.detail;
+                                font-size: 10px;
+                                color: gray;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                                width: 52px;
+                            }
+                        }
+                    }
                 }
             }
         }

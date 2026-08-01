@@ -9,3 +9,4 @@
 pub mod config;
 pub mod graph;
 pub mod replay_check;
+pub mod setup_view;
