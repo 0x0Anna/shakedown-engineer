@@ -13,6 +13,9 @@
 //!
 //! - [`replay`] — the replay metadata `.ini` sidecar NGPCarMenu writes
 //!   next to every `.rpl`.
+//! - [`install`] — install-root path discovery/configuration: resolving
+//!   every location this app needs (telemetry, replays, setups, ...) from
+//!   one required install root, with per-path overrides and validation.
 //!
 //! Planned (see PROJECT_PLAN.md's "RSF real-capture validation" section
 //! for the reverse-engineering notes): the `.lsp` setup sheet, the
@@ -28,10 +31,15 @@
 
 mod error;
 pub mod ini;
+pub mod install;
 pub mod replay;
 
 pub use error::RbrError;
 pub use ini::Ini;
+pub use install::{
+    read_ngp_settings, validate, InstallConfig, InstallPaths, MissingPath, NgpSettings,
+    PathOverrides, ValidationReport,
+};
 pub use replay::{
     parse_replay_ini, parse_replay_ini_str, CarInfo, Conditions, RecoverySpot, ReplayInfo,
     ResultInfo, StageInfo, Versions,

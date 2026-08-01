@@ -113,9 +113,8 @@ pub fn cross_check_recoveries(session: &Session, replay: &ReplayInfo) -> Recover
                 replay_penalty_secs: spot.and_then(|s| s.penalty_secs),
                 telemetry_timecode_ms: penalty.map(|p| p.timecode_ms),
                 telemetry_penalty_secs: penalty.map(|p| p.penalty_ms / 1000.0),
-                telemetry_position_m: penalty.and_then(|p| {
-                    distance_channel.and_then(|c| value_at(c, p.timecode_ms))
-                }),
+                telemetry_position_m: penalty
+                    .and_then(|p| distance_channel.and_then(|c| value_at(c, p.timecode_ms))),
             }
         })
         .collect();

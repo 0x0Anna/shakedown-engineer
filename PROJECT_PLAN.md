@@ -1337,11 +1337,40 @@ single-channel default; no other worksheet/dock plumbing changed, since
       combination. Anna is capturing these separately. (The 1009-row pre-start
       window is no longer open: `totalSteps` = 5050 at the stage start in both
       runs, so the countdown is a fixed physics-tick count.)
-- [ ] Build install-root configuration + path discovery (see the design note
-      above). Prerequisite for anything that loads data outside `.sample-data/`,
-      and it supersedes the "how does replay metadata reach the app" question
-      below — pairing a `.ld` with its `.rpl`/`.ini` should go through resolved
-      paths, not a folder convention.
+- [x] **Install-root configuration + path discovery (2026-07-31)** — new
+      `sde_rbr::install` module (`crates/sde-formats/rbr/src/install.rs`,
+      UI-free per the design note above). `InstallConfig { root, overrides }`
+      resolves to `InstallPaths` (one field per row of the path table above:
+      NGP telemetry dir, `Telemetry.ini`, `RichardBurnsRally.ini`, `Replays\`,
+      `SavedGames\`, `Plugins\Pacenote\`, `rsfdata\cars\`, `Maps\`,
+      `RallySimFans.ini`, `rallysimfans_personal.ini`) — `PathOverrides` lets
+      any single path be redirected without affecting the others (e.g. a
+      telemetry folder relocated to another drive). `validate(&InstallPaths)
+      -> ValidationReport` checks every path against the filesystem and
+      reports *all* that are missing rather than stopping at the first one,
+      matching the design note's "report which expected paths are missing
+      rather than failing wholesale." `ValidationReport::root_looks_valid()`
+      narrows this to the two cheapest, most load-bearing markers
+      (`RichardBurnsRally.ini` + `Plugins\NGP\Telemetry.ini`) — an install
+      missing `Maps\` or an unconfigured `Plugins\Pacenote\` isn't "wrong
+      root," but missing both of those two almost certainly is. Also added
+      `read_ngp_settings(&InstallPaths) -> NgpSettings` (via the existing
+      `ini::Ini` reader, no new dependency) exposing `RichardBurnsRally.ini`'s
+      `[NGP]` `telemetryRecording`/`telemetryTics` keys — the design note's
+      "'telemetry recording is currently off' is a much better first-run
+      experience than an empty file list" is now backed by an actual reader,
+      though not yet surfaced in any UI. Ten new unit tests (path resolution,
+      per-path override isolation, validation reporting every miss, root
+      validity, NGP settings happy/missing-key/missing-file paths) using
+      real temp directories rather than mocking the filesystem, consistent
+      with this crate's existing on-disk test style. **Not done yet:** no
+      `sde-app` UI reads any of this (no settings screen, no install-root
+      picker); this was scoped as the config-model prerequisite the design
+      note and the replay-metadata-pairing item above both called for, not
+      the UI that consumes it. Auto-pairing a loaded `.ld`/`.tsv` with its
+      matching `.rpl`/`.ini` via `InstallPaths::replays_dir` /
+      `ngp_telemetry_dir` (rather than a manual second file picker) is a
+      natural follow-on now that this exists.
 - [ ] Consider reading the NGP `.tsv` directly rather than the converted `.ld`,
       to recover `utcSystemTime` (absolute wall clock — the natural anchor for
       `sde-video` sync), `totalSteps`, and untruncated channel names.
