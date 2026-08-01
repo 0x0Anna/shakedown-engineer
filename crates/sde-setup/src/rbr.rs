@@ -42,6 +42,19 @@ const UNITS: &[(&str, &str)] = &[
     ("Position", "m"),
 ];
 
+/// Keys whose numeric value is an *identifier*, not a quantity — RBR's
+/// `GearId0..9`, `FinalDriveId`, `DropGearId` (indices into the car's
+/// ratio tables) and `TopMountSlot`. Matched as a suffix of the key with
+/// any trailing digits trimmed, the same way [`UNITS`] is.
+///
+/// These are adapted as [`SetupValue::Text`] rather than
+/// [`SetupValue::Number`] so a diff reports them as a plain change
+/// (`12 → 11`) instead of computing a delta and percentage against them:
+/// "gear id 12 became 11" is a *different gear*, not an 8.3% reduction in
+/// anything. Whether the change is large or small is a question about the
+/// ratio table these index into, which this crate doesn't have.
+const IDENTIFIER_SUFFIXES: &[&str] = &["Id", "Slot"];
+
 /// Load and adapt a `.lsp` setup file.
 ///
 /// [`Setup::name`] is the file stem (`"Tarmac Bumpy"`), which is what RSF
@@ -75,6 +88,9 @@ pub fn from_lsp(parsed: &LspSetup, name: &str) -> Setup {
                     key: entry.key.clone(),
                     label: prettify(&entry.key),
                     value: match entry.values.as_slice() {
+                        [v] if is_identifier(&entry.key) => {
+                            SetupValue::Text(SetupValue::Number(*v).display())
+                        }
                         [v] => SetupValue::Number(*v),
                         vs => SetupValue::Vector(vs.to_vec()),
                     },
@@ -95,10 +111,23 @@ pub fn from_lsp(parsed: &LspSetup, name: &str) -> Setup {
     }
 }
 
+/// Whether a key names an identifier rather than a quantity — see
+/// [`IDENTIFIER_SUFFIXES`].
+#[must_use]
+pub fn is_identifier(key: &str) -> bool {
+    let base = key_base(key);
+    IDENTIFIER_SUFFIXES
+        .iter()
+        .any(|suffix| base.len() >= suffix.len() && base.ends_with(suffix))
+}
+
 /// The unit for a setup key, or `None` when it isn't confidently known.
 #[must_use]
 pub fn unit_for(key: &str) -> Option<&'static str> {
-    let base = strip_ngp(key).trim_end_matches(|c: char| c.is_ascii_digit());
+    if is_identifier(key) {
+        return None;
+    }
+    let base = key_base(key);
     UNITS
         .iter()
         .find(|(suffix, _)| contains_ignore_case(base, suffix))
@@ -115,6 +144,15 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
 /// from stock RBR fields but says nothing about the quantity.
 fn strip_ngp(key: &str) -> &str {
     key.strip_suffix("_NGP").unwrap_or(key)
+}
+
+/// A key reduced to what the suffix tables match against: without its
+/// `_NGP` marker, and without the trailing index of a numbered series
+/// (`GearId0`, `CenterDiffThrottle_00`).
+fn key_base(key: &str) -> &str {
+    strip_ngp(key)
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .trim_end_matches('_')
 }
 
 /// Turn an RBR key into something readable: `"FrontRollBarStiffness"` ->
@@ -280,6 +318,40 @@ mod tests {
                 .unit,
             None
         );
+    }
+
+    #[test]
+    fn identifier_keys_carry_no_arithmetic() {
+        assert!(is_identifier("GearId0"));
+        assert!(is_identifier("FinalDriveId"));
+        assert!(is_identifier("DropGearId"));
+        assert!(is_identifier("TopMountSlot"));
+        assert!(!is_identifier("SpringStiffness"));
+        assert!(!is_identifier("Pressure"));
+
+        let setup = from_lsp(
+            &parse_lsp_str("((\"CarSetup\"\n Drive (\":-D\"\n DropGearId 12\n DropGearId\n )\n ))"),
+            "a",
+        );
+        let other = from_lsp(
+            &parse_lsp_str("((\"CarSetup\"\n Drive (\":-D\"\n DropGearId 11\n DropGearId\n )\n ))"),
+            "b",
+        );
+        // Text, so the change is reported without a meaningless "-8.3%".
+        assert_eq!(
+            setup
+                .group("Drive")
+                .unwrap()
+                .entry("DropGearId")
+                .unwrap()
+                .value,
+            SetupValue::Text("12".into())
+        );
+        let d = crate::diff(&setup, &other);
+        assert_eq!(d.change_count(), 1);
+        assert_eq!(d.groups[0].entries[0].delta(), None);
+        assert_eq!(d.groups[0].entries[0].percent_change(), None);
+        assert_eq!(d.groups[0].entries[0].summary(), "12 -> 11");
     }
 
     #[test]
