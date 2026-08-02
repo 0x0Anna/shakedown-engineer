@@ -36,6 +36,77 @@ the port faithfully; new *feature* work goes into the rally-focused crates above
   native Rust (`three-d` or `wgpu`), to avoid breaking the modular crate architecture and
   avoid a second UI paradigm/process alongside Slint.
 
+## Where things stand / what to pick up next *(updated 2026-08-02)*
+
+A running "you are here" pointer, so a session starting cold doesn't have to
+reconstruct the state from the milestone list below. **Update this section
+whenever a milestone closes or a new blocker appears** — the detail belongs in
+the milestone entries and design notes; this is only the index into them.
+
+**Done:** milestones 1–6. Telemetry parsing (MoTeC `.ld` + `.ldx`, iRacing
+`.ibt`, shtep, NGP `.tsv`), `sde-core::Session`, the Slint app with
+worksheets/docks/lap comparison/math channels/zoom-pan, RBR install discovery +
+replay `.ini` pairing + recovery cross-check, and `sde-setup` (`.lsp` parser,
+sim-agnostic model, diff engine, CLI + app panel).
+
+**Open branch:** `milestone-6-sde-setup` -> PR #12, which carries milestone 6
+plus the 2026-08-02 interaction pass (setup panel relayout, proportional
+zoom/pan with deferred axis locking, and dock-header dragging — plain to
+reorder, Ctrl to merge into an overlay group).
+
+**Next up, in the order they make sense:**
+
+1. **Eyeball PR #12 before merging.** The setup-panel relayout and the
+   drag-to-merge feel are reasoned from the markup and Slint's input source,
+   and are covered by unit tests on the *arithmetic*, but neither has been
+   watched on screen. Everything else in the PR has been verified against the
+   real `.sample-data/` captures.
+2. **Milestone 7, `sde-analysis`** — the next planned milestone and the one
+   the whole race-engineer motivation points at: damper velocity histograms,
+   ABS/TC intervention markers and stats, ride-height/roll estimates, brake
+   bias effectiveness. Nothing blocks it; `sde-core::Session` and the math
+   channel machinery are both in place.
+3. **Second half of design-note principle 8** — pairing the setup diff with a
+   *performance* delta trace. Deliberately deferred out of milestone 6 because
+   it needs the app to hold **two loaded sessions** at once, which `AppState`
+   currently isn't shaped for (one `session: Option<Session>`). That reshape
+   is the real work; the setup diff itself is done.
+
+**Known gaps worth recording (none blocking):**
+
+- **An overlay group can be built but not taken apart.** Dragging merges
+  (Ctrl) and reorders (plain), but there's no gesture for pulling one channel
+  back out of a merged dock — the only exit is removing the whole dock with
+  its "x" and re-adding the channels individually. The natural shape is a
+  small remove control per swatch in the dock's existing per-channel legend
+  (`app.slint`'s `DockPanel`, shown only when a dock overlays more than one
+  channel), which would need `dock_channels[i]` to drop one entry and collapse
+  the dock back to a plain one when a single channel is left.
+- The stacked layout's `ListView` would normally steal a drag past 8px and
+  cancel the dragged header's grab; it doesn't only because Slint's
+  `ScrollView` defaults to `interactive: false` (drag-to-pan off). If that
+  scroll behaviour is ever changed, header dragging in stacked mode breaks —
+  see the interaction-pass notes under milestone 5.
+- No settings screen. The install root persists
+  (`%APPDATA%\sde-app\install_root.txt`) but nothing else does — no saved
+  worksheet layouts, no window state.
+- Telemetry files and replay `.ini`s are still paired by hand in the app
+  (`refresh_setup_panel` auto-resolves the *setup* from a loaded replay, but
+  the replay itself is a manual pick, and auto-matching by modification time
+  is only a fallback). No known filename/folder convention exists to pair
+  them reliably — see the open-task list at the bottom.
+- No genuine MoTeC-hardware `.ld` has ever been tested, so the nonzero-`shift`
+  conversion formula remains unverified against real hardware. Every file
+  tested so far (synthetic fixture, ACC export, RSF capture) has
+  `shift == 0`.
+
+**House rules that aren't in the code:** every change goes on a branch with a
+PR, never straight to `main`. `sde-formats`/`sde-core` stay UI-free and
+dependency-light; `sde-app` is the only crate allowed to depend on Slint, and
+arithmetic belongs in Rust, not in `.slint` markup. On-disk tests run against
+the gitignored `.sample-data/` when it's present and return early when it
+isn't, so CI stays green without it.
+
 ## Tech stack decisions
 
 - **Language:** Rust (workspace of multiple crates).
@@ -64,7 +135,10 @@ crates/
 │   ├── rbr/               # RBR/RSF companion files — STARTED (`sde-rbr`).
 │   │                      #   ini.rs     — shared minimal INI reader
 │   │                      #   replay.rs  — replay metadata .ini sidecar (DONE)
-│   │                      #   todo: .lsp setup sheet, pacenote .ini, .rpl frames
+│   │                      #   install.rs — install-root path discovery (DONE)
+│   │                      #   pairing.rs — telemetry <-> replay matching (DONE)
+│   │                      #   setup.rs   — .lsp setup sheet (DONE)
+│   │                      #   todo: pacenote .ini, .rpl frames
 │   └── dirt_rally/, acr/, ea_wrc/         # per-sim SETUP FILE adapters
 │                                            # (read each sim's own install-dir car/track/
 │                                            #  setup files, map into sde-setup's model —
@@ -77,10 +151,12 @@ crates/
 │                          # engine, interpolation/resampling, metadata DB cache (sqlite)
 │                          # — depends on sde-formats, UI-free
 │
-├── sde-setup/             # NEW (race-engineer feature): sim-agnostic setup sheet model —
-│                          # springs, dampers, ARBs, ride height, diff, gearing, tire
-│                          # pressures/compounds. Versioned and diffable per stage.
-│                          # Populated either manually or via sde-formats::<sim> adapters.
+├── sde-setup/             # DONE (race-engineer feature, milestone 6): sim-agnostic setup
+│                          # sheet model + diff engine. Ordered named groups of named
+│                          # entries rather than a fixed springs/dampers/ARBs struct, so
+│                          # each sim's own sheet shape survives. Per-sim adapters live
+│                          # here (sde_setup::rbr) reading sde-formats::<sim> parsers,
+│                          # keeping the format crates leaf dependencies.
 │
 ├── sde-analysis/          # NEW (race-engineer feature): derived-channel analysis —
 │                          # damper velocity histograms, ABS/TC intervention markers +
@@ -769,8 +845,116 @@ Subaru_WRX_STI/*.ibt`) before writing any Rust:
      reaching `graph::zoom_scroll` — not just "which effect wins" but "the
      other axis's input is discarded outright" — so off-axis jitter can't
      leak through even partially.
+
+   *(Interaction pass, 2026-08-02 — from live testing feedback on a real
+   RBR session):* three fixes/additions, all reported as "the UI does seem
+   quirky".
+   - **Setup panel didn't render.** The panel was wrapped in an `if
+     root.setup-panel-visible:` inside the worksheet's `HorizontalBox`, so
+     toggling it added/removed a layout *child* rather than resizing one.
+     Now always instantiated and collapsed instead (`width:
+     root.setup-panel-visible ? 340px : 0px; visible: ...`), matching how
+     the sidebar — which never had the problem — sits in the same layout.
+   - **Zoom/pan glitchiness.** Two causes. (a) The zoom applied a flat
+     `0.9`/`1/0.9` factor per *event*, which is right for a mouse wheel
+     (one event = one 120-unit notch) but wildly wrong for a trackpad
+     emitting ~20 fractional-notch events per swipe: `0.9^20 ≈ 0.12`, a
+     ~8x zoom from one gesture. Zoom (and pan) are now proportional to
+     `delta / WHEEL_NOTCH`, so a notch does exactly what it always did and
+     a partial notch does proportionally less. (b) The axis lock above
+     decided from the gesture's *first* event, which on a trackpad is
+     often a couple of jittery pixels — an intended pan whose first event
+     favored vertical would zoom for the rest of the gesture.
+     `graph::ScrollGesture` now accumulates until `AXIS_LOCK_THRESHOLD`
+     (12) of movement before locking, then applies the accumulated delta
+     so nothing is lost to the wait. One wheel notch clears the threshold
+     immediately, so a mouse still zooms on its first event.
+   - **Drag a dock by its header to reorder it; hold Ctrl to merge it into
+     the dock you drop it on** — the answer to a worksheet cluttered with
+     panels that could be consolidated. Slint 1.17 does have `DragArea`/
+     `DropArea`, but their payload type is only reachable through
+     `slint::private_unstable_api`, so this uses a plain `TouchArea` on
+     the dock name (`MouseCursor.grab`) and puts the arithmetic in Rust
+     with the rest of the layout math. `graph::drag_drop_target` turns the
+     drag offset plus the dragged dock's own cell size into a target
+     index — every layout mode places docks on a fixed pitch, so no hit
+     testing in markup is needed — and that one index then feeds either
+     `graph::reorder_docks` (move-to-index semantics) or
+     `graph::merge_docks` (folds the source's channels into the target,
+     skipping duplicates and keeping the target's order, then drops the
+     source). All three are pure and unit tested, including the grid's
+     don't-wrap-off-the-edge case and the rounds-to-zero case that makes a
+     plain click on the handle harmless.
+   - *Why a modifier rather than drop-between-docks zones* (considered,
+     rejected): one gesture and one mental model beats two, drop zones get
+     thin exactly when the worksheet is crowded enough to need them, and
+     in the 2-column grid "between" is ambiguous (between two cells in a
+     row, or between rows?). Because `drag_drop_target` returns a plain
+     target index and says nothing about what the drop *does*, a modifier
+     distinguishes the two actions at identical drag geometry for free.
+     **Ctrl** specifically, because Ctrl+click already means "overlay" in
+     the channel sidebar — same vocabulary, same result.
+   - The modifier is sampled from `pointer-event` (which carries live
+     `modifiers`) on every movement and reported alongside the drag
+     offset, *not* read at release: whichever way the hovered dock is
+     highlighted is then always what a release actually does. While
+     dragging, the source fades; a merge target tints blue (its contents
+     are about to change), a reorder target only outlines in amber (only
+     the position is). Driven by two `-1`-means-none int properties plus
+     one bool that Rust pushes back
+     (`dock-drag-source`/`dock-drag-target`/`dock-drag-merges`).
 6. **`sde-setup`** — setup sheet data model + diff view between two setups. First
-   genuinely new (non-port) feature.
+   genuinely new (non-port) feature. *(Done, 2026-08-01 — see
+   `crates/sde-setup`, `crates/sde-formats/rbr/src/setup.rs`,
+   `crates/sde-app/src/setup_view.rs`.)* Four pieces:
+   - **`.lsp` parser** (`sde_rbr::setup`, the location decided in the open-task
+     entry below): an s-expression tokenizer rather than a line reader, so the
+     copy embedded in a `.rpl` parses the same way if that's ever pursued.
+     Handles the two real quirks — every section repeats its key list as a
+     value-less trailer (a key with no values *is* the trailer marker, and is
+     dropped), and `vecTopMountPosition` carries three values, so an entry
+     holds a list. Number atoms are recognized narrowly (leading digit after an
+     optional sign) rather than via `f64::from_str`, which would otherwise
+     swallow a key spelled `inf`/`NaN` as a value of the entry before it.
+   - **Sim-agnostic model** (`sde_setup::{Setup, SetupGroup, SetupEntry,
+     SetupValue}`): ordered named groups of named entries, *not* a fixed
+     struct of springs/dampers/ARBs. Every sim exposes a different subset of
+     adjustments under different names; a fixed schema would either discard
+     what doesn't fit or force adapters to invent values they don't have.
+     Ordered groups also preserve each sim's own sheet layout — the one its
+     users already know — while still giving the diff a stable key to match on.
+   - **Diff** (`sde_setup::diff`): keeps only what differs, matched by key
+     within a group (never by position — two sheets from different plugin
+     versions can carry different entry counts), reporting one-sided entries
+     rather than dropping them. `percent_change` divides by the left value's
+     *magnitude* so its sign agrees with the delta for negative quantities
+     (`WheelAxisInclination` -0.057 -> -0.070 is a -22% change, not +22%).
+   - **RBR adapter** (`sde_setup::rbr`), living in `sde-setup` rather than
+     `sde-rbr` so the format crates stay leaf dependencies — the same direction
+     `sde-core` sits in relative to the telemetry parsers. Prettifies RBR's
+     `CamelCase` keys (`"BumpStopStiffnessRear_NGP"` -> `"Bump Stop Stiffness
+     Rear (NGP)"`, corner markers like `LF`/`RB` kept whole) and attaches units
+     only where the captures confirm them (N/m, Pa, Ns/m, Nm, m). The angles
+     and the ratio-like NGP values are deliberately left unlabelled: their
+     magnitudes are *consistent* with radians and 0..1 ratios, but nothing
+     confirms it, and a wrong unit on a setup sheet is worse than no unit.
+   - **Surfaces**: `sde-cli` gained a `diff_setups` binary (one path prints the
+     sheet, two print the diff with percentages), and `sde-app` a "Setup"
+     panel — the loaded run's sheet, auto-resolved from the replay `.ini`'s
+     `SetupName` against the install root (`sde_app::setup_view::
+     resolve_setup_path`, which splits RSF's Windows-style relative path on
+     both separators and also tries a relocated `saved_games_dir`), plus
+     "Open setup..." / "Compare..." pickers that switch the panel to showing
+     only what differs. This is the first half of the design note's principle 8
+     (setup-diff-aware comparison); pairing it with a *performance* delta trace
+     is still to come, and needs the comparison to span two loaded sessions
+     rather than one.
+   - **Correction to an earlier note:** the "Install-path discovery" section
+     below says the two sample setups differ in "58 values in all". That was an
+     undercount — the real figure is **73**, confirmed both by this parser and
+     independently by a plain line diff of the two files. The other figures in
+     that note (274 key/value pairs, 15 sections — 16 by this parser's count,
+     which excludes the document's own `"CarSetup"` wrapper) hold.
 7. **`sde-analysis`** — derived channels layered onto graphs: damper velocity
    histograms, ABS/TC intervention markers + stats, ride-height/roll estimates,
    brake bias effectiveness. This is where the race-engineer motivation pays off.
@@ -1041,7 +1225,7 @@ Also worth recording from the same investigation, none of it implemented yet:
 - **Setup `.lsp`** is a Lisp-style s-expression, 274 key/value pairs over 15
   sections, and diffs cleanly between the two runs (front springs 26000 ->
   45500 N/m, ARB 16000 -> 21000, brake pressure 4.0 -> 6.14 MPa, 58 values in
-  all). Two parsing quirks: each section repeats its key list with *empty*
+  all — **the count is wrong, it's 73**; see the correction under milestone 6). Two parsing quirks: each section repeats its key list with *empty*
   values as a trailer (skip any key not followed by a numeric), and
   `vecTopMountPosition` carries three. Run1's file has three trailing NUL bytes.
   Values tie directly to telemetry — `TyreLF.Pressure 195000` equals the
@@ -1539,8 +1723,11 @@ single-channel default; no other worksheet/dock plumbing changed, since
       real feature (not scoped yet), revisit reading the embedded copy as a
       drift-check against the standalone file — the same
       cross-validation spirit as this section's recovery-spot cross-check —
-      but that's a follow-on, not a blocker for a first `.lsp` parser. Not
-      implemented yet; this is the location/source decision only.
+      but that's a follow-on, not a blocker for a first `.lsp` parser.
+      *(Implemented 2026-08-01 exactly as decided here — `sde_rbr::setup`
+      reads the standalone file; see milestone 6 above for the parser's
+      design and the two file quirks it handles. The `.rpl`-embedded copy
+      remains untouched.)*
 - [ ] **Discrete-channel indicators (2026-07-27, scoped, not started):** source
       iRacing's official `irsdk_defines.h` (from the iRacing SDK download — not
       currently a local reference repo) for the real `irsdk_TrkLoc`/`irsdk_TrkSurf`/

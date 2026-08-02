@@ -19,10 +19,12 @@
 //! - [`pairing`] — best-effort matching of a loaded telemetry file to the
 //!   replay `.ini` sidecar describing the same run, since RSF/NGP has no
 //!   shared filename/folder convention between the two.
+//! - [`setup`] — the `.lsp` car setup sheet RBR writes into
+//!   `SavedGames\`, which the replay `.ini` names for each run.
 //!
 //! Planned (see PROJECT_PLAN.md's "RSF real-capture validation" section
-//! for the reverse-engineering notes): the `.lsp` setup sheet, the
-//! pacenote `.ini`, and the `.rpl` replay frame stream.
+//! for the reverse-engineering notes): the pacenote `.ini` and the `.rpl`
+//! replay frame stream.
 
 // clippy::pedantic/nursery notes, matching the convention in `sde-motec`:
 // - doc_markdown fires on plain-English mentions of PROJECT_PLAN.md, RSF,
@@ -37,6 +39,7 @@ pub mod ini;
 pub mod install;
 pub mod pairing;
 pub mod replay;
+pub mod setup;
 
 pub use error::RbrError;
 pub use ini::Ini;
@@ -49,3 +52,4 @@ pub use replay::{
     parse_replay_ini, parse_replay_ini_str, CarInfo, Conditions, RecoverySpot, ReplayInfo,
     ResultInfo, StageInfo, Versions,
 };
+pub use setup::{parse_lsp, parse_lsp_str, LspEntry, LspSection, LspSetup};

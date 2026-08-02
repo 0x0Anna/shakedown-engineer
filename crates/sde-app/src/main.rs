@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use slint::ComponentHandle;
 
-use sde_app::{graph, replay_check};
+use sde_app::{graph, replay_check, setup_view};
 
 slint::include_modules!();
 
@@ -91,6 +91,15 @@ struct AppState {
     /// manual "Open replay info..." pick instead, or wasn't auto-matched
     /// at all.
     replay_auto_match_gap: Option<std::time::Duration>,
+    /// The `.lsp` setup sheet the loaded run used — auto-resolved from
+    /// `replay_info`'s `SetupName` against `install_paths` on every load
+    /// (see `refresh_setup_panel`), or picked manually via "Open
+    /// setup...". Reset alongside `replay_info` for the same reason: a
+    /// previous run's setup would silently describe the wrong car.
+    setup: Option<sde_setup::Setup>,
+    /// A second setup picked via "Compare...", diffed against `setup`.
+    /// `None` means the panel shows the single sheet instead.
+    setup_compare: Option<sde_setup::Setup>,
     all_channel_names: Vec<String>,
     filter_text: String,
     /// Worksheet docks, in display order. Each dock overlays one or more
@@ -100,6 +109,19 @@ struct AppState {
     /// Channels queued (via Ctrl+click in the sidebar) to become one new
     /// overlay dock once "Add overlay dock" is clicked; cleared after.
     overlay_pending: Vec<String>,
+    /// The dock whose header is currently being dragged, and the dock a
+    /// release would act on (`graph::drag_drop_target`'s answer for the
+    /// latest drag offset). Both index `dock_channels`; both `None` when
+    /// no drag is in progress or the drag is over no other dock.
+    dock_drag_source: Option<usize>,
+    dock_drag_target: Option<usize>,
+    /// Whether Ctrl was held as of the last movement of the current drag,
+    /// which picks between the two things a drop can do: merge the source
+    /// into the target as one overlay dock (held) or move the source to
+    /// the target's position (not held). Sampled per movement rather than
+    /// read at release so the highlight the user is looking at and the
+    /// action they get are always the same thing.
+    dock_drag_merges: bool,
     /// `0` = whole session ("All"); `n >= 1` selects `session.laps[n - 1]`
     /// (mirrors `graph::lap_labels`' indexing). Only consulted when
     /// `compare_lap_indices` is empty.
@@ -118,16 +140,16 @@ struct AppState {
     /// `None` rather than `Some((0.0, 1.0))` so "is a zoom active" is a
     /// simple `is_some()` check.
     zoom: Option<(f64, f64)>,
-    /// The axis (zoom vs. pan) the *current* scroll gesture is locked to,
-    /// and when its last event arrived. Trackpads report a nonzero
-    /// `delta_x`/`delta_y` on nearly every event even for an intended
-    /// single-axis swipe, so reading both every event would make an
-    /// intended pan also drift the zoom level (and vice versa). Locking
-    /// to whichever axis dominated the *first* event of a gesture, and
-    /// re-deciding only after a pause (see `SCROLL_GESTURE_TIMEOUT`),
-    /// keeps the whole gesture on one axis the way a trackpad user
-    /// expects.
-    scroll_gesture: Option<(graph::ScrollAxis, std::time::Instant)>,
+    /// The in-progress scroll gesture: which axis (zoom vs. pan) it has
+    /// locked to, and any movement accumulated while that was still
+    /// undecided. See `graph::ScrollGesture` for why both the lock and
+    /// the accumulation are needed on a trackpad.
+    scroll_gesture: graph::ScrollGesture,
+    /// When the last scroll event arrived, so a quiet period can end the
+    /// current gesture (see `SCROLL_GESTURE_TIMEOUT`). Kept next to
+    /// `scroll_gesture` rather than inside it so the gesture logic itself
+    /// stays pure and unit-testable, with no clock in it.
+    scroll_last_event: Option<std::time::Instant>,
     /// Time (default) or distance x-axis — see `graph::AxisMode`. Reset to
     /// `Time` on every file load; toggled independently of lap
     /// selection/zoom, both of which stay time-based regardless.
@@ -154,8 +176,11 @@ const SCROLL_GESTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 const VIEW_WIDTH: f64 = 1000.0;
 const VIEW_HEIGHT: f64 = 1000.0;
 /// Fixed column count for the "Grid" worksheet layout (see `app.slint`'s
-/// `DockData.grid-col`/`grid-row`).
-const GRID_COLUMNS: i32 = 2;
+/// `DockData.grid-col`/`grid-row`). Derived from `graph`'s copy rather
+/// than spelled out twice, since `graph::drag_drop_target` has to assume
+/// the exact same grid pitch to work out drop targets in that layout.
+#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+const GRID_COLUMNS: i32 = graph::DOCK_GRID_COLUMNS as i32;
 
 /// Where the install-root config file lives: `%APPDATA%\sde-app\` on
 /// Windows (this app's only target platform today — see `Cargo.toml`).
@@ -207,6 +232,10 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(root) = config_dir().and_then(|dir| sde_app::config::load_install_root(&dir)) {
         apply_install_root(&window, &state, root);
     }
+
+    // So the (hidden by default) setup panel opens onto its empty-state
+    // guidance rather than a blank column before any file is loaded.
+    refresh_setup_panel(&window, &state);
 
     {
         let window_weak = window.as_weak();
@@ -298,6 +327,68 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
             }
             refresh_replay_status(&window, &state);
+
+            // A different replay means a different run, so its setup takes
+            // over — but only if one actually resolves. Failing to find it
+            // leaves whatever the panel had (possibly a manually opened
+            // sheet), rather than clearing the panel as a side effect of
+            // picking a replay.
+            if let Some(setup) = auto_resolve_setup(&state) {
+                let mut state_mut = state.borrow_mut();
+                state_mut.setup = Some(setup);
+                state_mut.setup_compare = None;
+            }
+            refresh_setup_panel(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_open_setup(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(setup) = pick_setup(&state, "Open a car setup (.lsp)") else {
+                return;
+            };
+            {
+                let mut state_mut = state.borrow_mut();
+                state_mut.setup = Some(setup);
+                // A newly picked *primary* setup invalidates any active
+                // comparison — the pair the user set up was between two
+                // specific sheets, and silently re-pointing one half of it
+                // would show a diff they never asked for.
+                state_mut.setup_compare = None;
+            }
+            refresh_setup_panel(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_compare_setup(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(setup) = pick_setup(&state, "Compare against a car setup (.lsp)") else {
+                return;
+            };
+            state.borrow_mut().setup_compare = Some(setup);
+            refresh_setup_panel(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_setup_comparison_cleared(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            state.borrow_mut().setup_compare = None;
+            refresh_setup_panel(&window, &state);
         });
     }
 
@@ -357,6 +448,95 @@ fn main() -> Result<(), slint::PlatformError> {
                     state_mut.dock_channels.remove(index);
                 }
                 drop(state_mut);
+                refresh_channel_list(&window, &state);
+                replot(&window, &state);
+            }
+        });
+    }
+
+    // -- header drag-and-drop: reorder docks, or merge them with Ctrl --
+    //
+    // The three handlers are deliberately thin: all the geometry lives in
+    // `graph::drag_drop_target` and all the list surgery in
+    // `graph::reorder_docks`/`graph::merge_docks`, all pure and unit
+    // tested. The same drag geometry feeds both actions, which is what
+    // lets a modifier pick between them (see the interaction notes under
+    // milestone 5 in PROJECT_PLAN.md).
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_dock_drag_started(move |index| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let mut state_mut = state.borrow_mut();
+            state_mut.dock_drag_source = usize::try_from(index)
+                .ok()
+                .filter(|i| *i < state_mut.dock_channels.len());
+            state_mut.dock_drag_target = None;
+            state_mut.dock_drag_merges = false;
+            drop(state_mut);
+            refresh_dock_drag_ui(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_dock_drag_moved(move |index, dx, dy, cell_width, cell_height, ctrl_held| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let layout = graph::DockLayout::from_index(window.get_layout_mode());
+            let mut state_mut = state.borrow_mut();
+            // A `moved` can arrive without a preceding `down` having been
+            // recorded (a press that started before the dock existed);
+            // trust the index the event carries either way.
+            let Ok(source) = usize::try_from(index) else {
+                return;
+            };
+            state_mut.dock_drag_source = Some(source);
+            state_mut.dock_drag_target = graph::drag_drop_target(
+                layout,
+                source,
+                state_mut.dock_channels.len(),
+                f64::from(dx),
+                f64::from(dy),
+                f64::from(cell_width),
+                f64::from(cell_height),
+            );
+            state_mut.dock_drag_merges = ctrl_held;
+            drop(state_mut);
+            refresh_dock_drag_ui(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_dock_drag_ended(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let mut state_mut = state.borrow_mut();
+            let changed = match (state_mut.dock_drag_source, state_mut.dock_drag_target) {
+                (Some(source), Some(target)) => {
+                    if state_mut.dock_drag_merges {
+                        graph::merge_docks(&mut state_mut.dock_channels, source, target)
+                    } else {
+                        graph::reorder_docks(&mut state_mut.dock_channels, source, target)
+                    }
+                }
+                // A press with no drag (or a drag that ended over nothing)
+                // just ends, leaving the worksheet as it was.
+                _ => false,
+            };
+            state_mut.dock_drag_source = None;
+            state_mut.dock_drag_target = None;
+            state_mut.dock_drag_merges = false;
+            drop(state_mut);
+            refresh_dock_drag_ui(&window, &state);
+            if changed {
                 refresh_channel_list(&window, &state);
                 replot(&window, &state);
             }
@@ -504,26 +684,28 @@ fn main() -> Result<(), slint::PlatformError> {
                 let mut state_mut = state.borrow_mut();
                 let (delta_x, delta_y) = (f64::from(delta_x), f64::from(delta_y));
 
+                // Scroll events carry no gesture start/end markers, so a
+                // quiet period is what ends one — after which the next
+                // event starts a fresh gesture free to lock to a different
+                // axis.
                 let now = std::time::Instant::now();
-                let axis = match state_mut.scroll_gesture {
-                    // Continuing a gesture still in progress: keep its
-                    // locked axis regardless of this event's own deltas.
-                    Some((axis, last)) if now.duration_since(last) < SCROLL_GESTURE_TIMEOUT => axis,
-                    // No gesture in progress (or the previous one timed
-                    // out): this event starts a new one, locked to
-                    // whichever axis it dominates.
-                    _ => graph::dominant_scroll_axis(delta_x, delta_y),
-                };
-                state_mut.scroll_gesture = Some((axis, now));
+                if state_mut
+                    .scroll_last_event
+                    .is_none_or(|last| now.duration_since(last) >= SCROLL_GESTURE_TIMEOUT)
+                {
+                    state_mut.scroll_gesture.reset();
+                }
+                state_mut.scroll_last_event = Some(now);
 
-                // Zero out the non-locked axis's delta entirely, rather
+                // The gesture zeroes the off-axis delta entirely, rather
                 // than just picking which effect to apply — trackpad
                 // jitter on the "wrong" axis shouldn't leak through even
-                // partially.
-                let (delta_x, delta_y) = match axis {
-                    graph::ScrollAxis::Zoom => (0.0, delta_y),
-                    graph::ScrollAxis::Pan => (delta_x, 0.0),
-                };
+                // partially — and returns (0, 0) until it has seen enough
+                // movement to know which axis the user means.
+                let (delta_x, delta_y) = state_mut.scroll_gesture.feed(delta_x, delta_y);
+                if delta_x == 0.0 && delta_y == 0.0 {
+                    return;
+                }
 
                 let current = state_mut.zoom.unwrap_or((0.0, 1.0));
                 let updated = graph::zoom_scroll(current, delta_x, delta_y, f64::from(fraction));
@@ -847,6 +1029,19 @@ fn current_range(session: &sde_core::Session, lap_index: usize) -> Option<(f64, 
     }
 }
 
+/// Push the in-progress dock drag (which dock is being dragged, which one
+/// a release would act on, and whether that action is a merge) into the
+/// window, so the markup can fade the source and highlight the target in
+/// the style matching what a release would do. `-1` for "none", since
+/// Slint has no optional int.
+fn refresh_dock_drag_ui(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
+    let state = state.borrow();
+    let as_index = |slot: Option<usize>| slot.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1);
+    window.set_dock_drag_source(as_index(state.dock_drag_source));
+    window.set_dock_drag_target(as_index(state.dock_drag_target));
+    window.set_dock_drag_merges(state.dock_drag_merges);
+}
+
 /// Recompute the (filtered) channel list and which of those channels are
 /// currently on the worksheet, and push both into the window. Called
 /// whenever the search text or the dock set changes.
@@ -1046,6 +1241,104 @@ fn refresh_replay_status(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     window.set_replay_status_text(text.into());
 }
 
+/// Show a file picker for a `.lsp` setup and load it, defaulting to the
+/// install's `SavedGames\` folder when a root is set. `None` if the user
+/// cancelled *or* the file didn't load — a bad pick leaves the panel
+/// showing whatever it already had rather than blanking it.
+fn pick_setup(state: &Rc<RefCell<AppState>>, title: &str) -> Option<sde_setup::Setup> {
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("RBR car setup", &["lsp"])
+        .set_title(title);
+    if let Some(dir) = state
+        .borrow()
+        .install_paths
+        .as_ref()
+        .map(|p| p.saved_games_dir.clone())
+    {
+        dialog = dialog.set_directory(dir);
+    }
+    let path = dialog.pick_file()?;
+    sde_setup::rbr::load_lsp(&path).ok()
+}
+
+/// Push the setup panel's contents into the window: the whole sheet, or
+/// only what differs once a comparison setup is picked.
+///
+/// Per PROJECT_PLAN.md's UI/UX design note, principle 8 — a performance
+/// comparison next to *what actually changed between the two setups* is
+/// the differentiated feature here, so the diff view is the one the panel
+/// switches to as soon as there's a second setup to show.
+fn refresh_setup_panel(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
+    let state = state.borrow();
+
+    let (title, subtitle, rows, comparing) = match (&state.setup, &state.setup_compare) {
+        (Some(left), Some(right)) => {
+            let diff = sde_setup::diff(left, right);
+            let subtitle = if diff.is_empty() {
+                "Identical — no values differ.".to_string()
+            } else {
+                format!("{} values differ", diff.change_count())
+            };
+            (
+                format!("{} → {}", left.name, right.name),
+                subtitle,
+                setup_view::rows_for_diff(&diff),
+                true,
+            )
+        }
+        (Some(setup), None) => (
+            setup.name.clone(),
+            format!(
+                "{} values in {} groups — {}",
+                setup.entry_count(),
+                setup.groups.len(),
+                setup.source
+            ),
+            setup_view::rows_for_setup(setup),
+            false,
+        ),
+        (None, _) => (
+            "Setup".to_string(),
+            "No setup loaded. Set an RBR install root and load a run to \
+             resolve its setup automatically, or open one directly."
+                .to_string(),
+            Vec::new(),
+            false,
+        ),
+    };
+
+    window.set_setup_panel_title(title.into());
+    window.set_setup_panel_subtitle(subtitle.into());
+    window.set_setup_comparing(comparing);
+    window.set_setup_rows(slint::ModelRc::new(slint::VecModel::from(
+        rows.into_iter()
+            .map(|row| SetupRowData {
+                is_group: row.is_group,
+                label: row.label.into(),
+                value: row.value.into(),
+                detail: row.detail.into(),
+            })
+            .collect::<Vec<_>>(),
+    )));
+}
+
+/// Resolve the `.lsp` the currently loaded replay names, if any. Needs
+/// both an install root (to resolve RSF's install-relative `SetupName`)
+/// and a loaded replay `.ini`; a missing or unreadable file just means no
+/// setup, not an error worth surfacing over the telemetry itself.
+fn auto_resolve_setup(state: &Rc<RefCell<AppState>>) -> Option<sde_setup::Setup> {
+    let state = state.borrow();
+    let paths = state.install_paths.as_ref()?;
+    let setup_name = state.replay_info.as_ref()?.car.setup_name.as_ref()?;
+    let path = setup_view::resolve_setup_path(paths, setup_name)?;
+    let mut setup = sde_setup::rbr::load_lsp(&path).ok()?;
+    // The `.lsp` itself carries no car identity (it's implied by the
+    // folder it lives in) — the replay does, so fill it in here where
+    // both are in hand.
+    setup.car.clone_from(&state.replay_info.as_ref()?.car.model);
+    Some(setup)
+}
+
 fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
     let file_name = path.file_name().map_or_else(
         || path.to_string_lossy().to_string(),
@@ -1077,10 +1370,16 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
                 let install_paths = state_mut.install_paths.take();
                 let replay_info = state_mut.replay_info.take();
                 let replay_auto_match_gap = state_mut.replay_auto_match_gap.take();
+                // The setup belongs to the replay, so it's preserved on
+                // exactly the same terms.
+                let setup = state_mut.setup.take();
+                let setup_compare = state_mut.setup_compare.take();
                 *state_mut = AppState {
                     install_paths,
                     replay_info,
                     replay_auto_match_gap,
+                    setup,
+                    setup_compare,
                     ..AppState::default()
                 };
             }
@@ -1151,6 +1450,18 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
         state.session_generation += 1;
     }
 
+    // Resolve this run's setup sheet from the replay info just loaded.
+    // Separate borrow because `auto_resolve_setup` reads the state it
+    // depends on (the borrow above is still held at that point).
+    let auto_setup = auto_resolve_setup(state);
+    {
+        let mut state = state.borrow_mut();
+        state.setup = auto_setup;
+        // A comparison pairs two specific sheets; the left one just
+        // changed, so the pairing no longer means what the user set up.
+        state.setup_compare = None;
+    }
+
     window.set_window_title(format!("sde-app — {file_name}").into());
     window
         .set_status_text("No channels added to the worksheet yet — click one on the left.".into());
@@ -1168,6 +1479,7 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
     refresh_compare_ui(window, state);
     refresh_zoom_ui(window, state);
     refresh_axis_ui(window, state);
+    refresh_setup_panel(window, state);
     replot(window, state);
 }
 

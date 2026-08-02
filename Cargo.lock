@@ -4251,6 +4251,7 @@ dependencies = [
  "rfd",
  "sde-core",
  "sde-rbr",
+ "sde-setup",
  "slint",
  "slint-build",
 ]
@@ -4260,6 +4261,7 @@ name = "sde-cli"
 version = "0.1.0"
 dependencies = [
  "sde-core",
+ "sde-setup",
 ]
 
 [[package]]
@@ -4300,6 +4302,13 @@ name = "sde-rbr"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "sde-setup"
+version = "0.1.0"
+dependencies = [
+ "sde-rbr",
 ]
 
 [[package]]

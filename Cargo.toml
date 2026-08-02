@@ -6,6 +6,7 @@ members = [
     "crates/sde-formats/ibt",
     "crates/sde-formats/shtep",
     "crates/sde-core",
+    "crates/sde-setup",
     "crates/sde-cli",
     "crates/sde-app",
 ]
