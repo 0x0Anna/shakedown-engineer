@@ -51,8 +51,8 @@ sim-agnostic model, diff engine, CLI + app panel).
 
 **Open branch:** `milestone-6-sde-setup` -> PR #12, which carries milestone 6
 plus the 2026-08-02 interaction pass (setup panel relayout, proportional
-zoom/pan with deferred axis locking, drag-a-dock-header-onto-another to merge
-into an overlay group).
+zoom/pan with deferred axis locking, and dock-header dragging — plain to
+reorder, Ctrl to merge into an overlay group).
 
 **Next up, in the order they make sense:**
 
@@ -74,13 +74,14 @@ into an overlay group).
 
 **Known gaps worth recording (none blocking):**
 
-- **Dock drags merge but never reorder.** `graph::drag_drop_target` returns a
-  target index and `merge_docks` always folds source into target — there's no
-  gesture for moving a dock to a different position, or for splitting a merged
-  overlay group back apart (the only exit is removing the whole dock with its
-  "x" and re-adding the channels). If reordering is wanted, the natural shape
-  is a modifier key or a drop-between-docks zone distinguishing "reorder" from
-  "merge" at the same drag geometry.
+- **An overlay group can be built but not taken apart.** Dragging merges
+  (Ctrl) and reorders (plain), but there's no gesture for pulling one channel
+  back out of a merged dock — the only exit is removing the whole dock with
+  its "x" and re-adding the channels individually. The natural shape is a
+  small remove control per swatch in the dock's existing per-channel legend
+  (`app.slint`'s `DockPanel`, shown only when a dock overlays more than one
+  channel), which would need `dock_channels[i]` to drop one entry and collapse
+  the dock back to a plain one when a single channel is left.
 - The stacked layout's `ListView` would normally steal a drag past 8px and
   cancel the dragged header's grab; it doesn't only because Slint's
   `ScrollView` defaults to `interactive: false` (drag-to-pan off). If that
@@ -868,23 +869,40 @@ Subaru_WRX_STI/*.ibt`) before writing any Rust:
      (12) of movement before locking, then applies the accumulated delta
      so nothing is lost to the wait. One wheel notch clears the threshold
      immediately, so a mouse still zooms on its first event.
-   - **Drag a dock's header onto another to merge them into one overlay
-     group** — the requested answer to a worksheet cluttered with panels
-     that could be consolidated. Slint 1.17 does have `DragArea`/
+   - **Drag a dock by its header to reorder it; hold Ctrl to merge it into
+     the dock you drop it on** — the answer to a worksheet cluttered with
+     panels that could be consolidated. Slint 1.17 does have `DragArea`/
      `DropArea`, but their payload type is only reachable through
      `slint::private_unstable_api`, so this uses a plain `TouchArea` on
      the dock name (`MouseCursor.grab`) and puts the arithmetic in Rust
      with the rest of the layout math. `graph::drag_drop_target` turns the
      drag offset plus the dragged dock's own cell size into a target
      index — every layout mode places docks on a fixed pitch, so no hit
-     testing in markup is needed — and `graph::merge_docks` folds the
-     source dock's channels into the target (skipping duplicates, keeping
-     the target's order) and drops the source. Both pure and unit tested,
-     including the grid's don't-wrap-off-the-edge case and the
-     rounds-to-zero case that makes a plain click on the handle harmless.
-     While dragging, the source fades and the hovered target gets a blue
-     border, driven by two `-1`-means-none int properties Rust pushes back
-     (`dock-drag-source`/`dock-drag-target`).
+     testing in markup is needed — and that one index then feeds either
+     `graph::reorder_docks` (move-to-index semantics) or
+     `graph::merge_docks` (folds the source's channels into the target,
+     skipping duplicates and keeping the target's order, then drops the
+     source). All three are pure and unit tested, including the grid's
+     don't-wrap-off-the-edge case and the rounds-to-zero case that makes a
+     plain click on the handle harmless.
+   - *Why a modifier rather than drop-between-docks zones* (considered,
+     rejected): one gesture and one mental model beats two, drop zones get
+     thin exactly when the worksheet is crowded enough to need them, and
+     in the 2-column grid "between" is ambiguous (between two cells in a
+     row, or between rows?). Because `drag_drop_target` returns a plain
+     target index and says nothing about what the drop *does*, a modifier
+     distinguishes the two actions at identical drag geometry for free.
+     **Ctrl** specifically, because Ctrl+click already means "overlay" in
+     the channel sidebar — same vocabulary, same result.
+   - The modifier is sampled from `pointer-event` (which carries live
+     `modifiers`) on every movement and reported alongside the drag
+     offset, *not* read at release: whichever way the hovered dock is
+     highlighted is then always what a release actually does. While
+     dragging, the source fades; a merge target tints blue (its contents
+     are about to change), a reorder target only outlines in amber (only
+     the position is). Driven by two `-1`-means-none int properties plus
+     one bool that Rust pushes back
+     (`dock-drag-source`/`dock-drag-target`/`dock-drag-merges`).
 6. **`sde-setup`** — setup sheet data model + diff view between two setups. First
    genuinely new (non-port) feature. *(Done, 2026-08-01 — see
    `crates/sde-setup`, `crates/sde-formats/rbr/src/setup.rs`,

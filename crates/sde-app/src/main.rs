@@ -110,11 +110,18 @@ struct AppState {
     /// overlay dock once "Add overlay dock" is clicked; cleared after.
     overlay_pending: Vec<String>,
     /// The dock whose header is currently being dragged, and the dock a
-    /// release would merge it into (`graph::drag_drop_target`'s answer for
-    /// the latest drag offset). Both index `dock_channels`; both `None`
-    /// when no drag is in progress or the drag is over no other dock.
+    /// release would act on (`graph::drag_drop_target`'s answer for the
+    /// latest drag offset). Both index `dock_channels`; both `None` when
+    /// no drag is in progress or the drag is over no other dock.
     dock_drag_source: Option<usize>,
     dock_drag_target: Option<usize>,
+    /// Whether Ctrl was held as of the last movement of the current drag,
+    /// which picks between the two things a drop can do: merge the source
+    /// into the target as one overlay dock (held) or move the source to
+    /// the target's position (not held). Sampled per movement rather than
+    /// read at release so the highlight the user is looking at and the
+    /// action they get are always the same thing.
+    dock_drag_merges: bool,
     /// `0` = whole session ("All"); `n >= 1` selects `session.laps[n - 1]`
     /// (mirrors `graph::lap_labels`' indexing). Only consulted when
     /// `compare_lap_indices` is empty.
@@ -447,11 +454,14 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // -- header drag-and-drop: merge one dock into another --
+    // -- header drag-and-drop: reorder docks, or merge them with Ctrl --
     //
     // The three handlers are deliberately thin: all the geometry lives in
     // `graph::drag_drop_target` and all the list surgery in
-    // `graph::merge_docks`, both pure and unit tested.
+    // `graph::reorder_docks`/`graph::merge_docks`, all pure and unit
+    // tested. The same drag geometry feeds both actions, which is what
+    // lets a modifier pick between them (see the interaction notes under
+    // milestone 5 in PROJECT_PLAN.md).
     {
         let window_weak = window.as_weak();
         let state = state.clone();
@@ -464,6 +474,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 .ok()
                 .filter(|i| *i < state_mut.dock_channels.len());
             state_mut.dock_drag_target = None;
+            state_mut.dock_drag_merges = false;
             drop(state_mut);
             refresh_dock_drag_ui(&window, &state);
         });
@@ -472,7 +483,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let window_weak = window.as_weak();
         let state = state.clone();
-        window.on_dock_drag_moved(move |index, dx, dy, cell_width, cell_height| {
+        window.on_dock_drag_moved(move |index, dx, dy, cell_width, cell_height, ctrl_held| {
             let Some(window) = window_weak.upgrade() else {
                 return;
             };
@@ -494,6 +505,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 f64::from(cell_width),
                 f64::from(cell_height),
             );
+            state_mut.dock_drag_merges = ctrl_held;
             drop(state_mut);
             refresh_dock_drag_ui(&window, &state);
         });
@@ -507,9 +519,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
             let mut state_mut = state.borrow_mut();
-            let merged = match (state_mut.dock_drag_source, state_mut.dock_drag_target) {
+            let changed = match (state_mut.dock_drag_source, state_mut.dock_drag_target) {
                 (Some(source), Some(target)) => {
-                    graph::merge_docks(&mut state_mut.dock_channels, source, target)
+                    if state_mut.dock_drag_merges {
+                        graph::merge_docks(&mut state_mut.dock_channels, source, target)
+                    } else {
+                        graph::reorder_docks(&mut state_mut.dock_channels, source, target)
+                    }
                 }
                 // A press with no drag (or a drag that ended over nothing)
                 // just ends, leaving the worksheet as it was.
@@ -517,9 +533,10 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             state_mut.dock_drag_source = None;
             state_mut.dock_drag_target = None;
+            state_mut.dock_drag_merges = false;
             drop(state_mut);
             refresh_dock_drag_ui(&window, &state);
-            if merged {
+            if changed {
                 refresh_channel_list(&window, &state);
                 replot(&window, &state);
             }
@@ -1012,15 +1029,17 @@ fn current_range(session: &sde_core::Session, lap_index: usize) -> Option<(f64, 
     }
 }
 
-/// Push the in-progress dock drag (which dock is being dragged, and which
-/// one a release would merge it into) into the window, so the markup can
-/// fade the source and highlight the target. `-1` for "none", since Slint
-/// has no optional int.
+/// Push the in-progress dock drag (which dock is being dragged, which one
+/// a release would act on, and whether that action is a merge) into the
+/// window, so the markup can fade the source and highlight the target in
+/// the style matching what a release would do. `-1` for "none", since
+/// Slint has no optional int.
 fn refresh_dock_drag_ui(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     let state = state.borrow();
     let as_index = |slot: Option<usize>| slot.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1);
     window.set_dock_drag_source(as_index(state.dock_drag_source));
     window.set_dock_drag_target(as_index(state.dock_drag_target));
+    window.set_dock_drag_merges(state.dock_drag_merges);
 }
 
 /// Recompute the (filtered) channel list and which of those channels are

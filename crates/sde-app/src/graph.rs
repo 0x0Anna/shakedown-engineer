@@ -776,6 +776,11 @@ pub const DOCK_GRID_COLUMNS: usize = 2;
 /// Rounding to the nearest cell also gives the click/drag distinction for
 /// free: a drag too short to reach a neighbouring cell rounds to zero
 /// cells moved, lands back on `source`, and yields `None`.
+///
+/// Deliberately says nothing about *what* the drop does — the same target
+/// index feeds either [`reorder_docks`] (plain drag) or [`merge_docks`]
+/// (Ctrl held), which is exactly why a modifier can distinguish the two
+/// without needing a second, differently-shaped drop geometry.
 #[must_use]
 pub fn drag_drop_target(
     layout: DockLayout,
@@ -821,9 +826,26 @@ pub fn drag_drop_target(
     usize::try_from(target).ok()
 }
 
+/// Move dock `source` to position `target`, shifting the docks in between
+/// along, and report whether anything changed. The plain (unmodified)
+/// header drag — see [`merge_docks`] for the Ctrl-held variant.
+///
+/// "Move to index" semantics: afterwards the moved dock *is* at `target`,
+/// whichever direction it came from.
+pub fn reorder_docks(docks: &mut Vec<Vec<String>>, source: usize, target: usize) -> bool {
+    if source == target || source >= docks.len() || target >= docks.len() {
+        return false;
+    }
+
+    let moved = docks.remove(source);
+    docks.insert(target, moved);
+    true
+}
+
 /// Fold dock `source`'s channels into dock `target` (an overlay group)
 /// and drop the now-empty source dock, reporting whether anything
-/// changed.
+/// changed. The Ctrl-held header drag — see [`reorder_docks`] for the
+/// plain one.
 ///
 /// Channels `target` already plots are skipped rather than duplicated —
 /// dropping a dock onto one that overlaps it shouldn't plot the same
@@ -1728,6 +1750,60 @@ mod tests {
             drag_drop_target(DockLayout::Stacked, 0, 3, 0.0, 100.0, 0.0, 0.0),
             None
         );
+    }
+
+    /// Three single-channel docks, for the reorder/merge tests below.
+    fn stub_docks() -> Vec<Vec<String>> {
+        vec![
+            vec!["Speed".to_string()],
+            vec!["Throttle".to_string()],
+            vec!["Brake".to_string()],
+        ]
+    }
+
+    #[test]
+    fn reorder_docks_moves_a_dock_to_the_target_index_from_either_direction() {
+        let mut docks = stub_docks();
+        assert!(reorder_docks(&mut docks, 0, 2));
+        assert_eq!(
+            docks,
+            vec![
+                vec!["Throttle".to_string()],
+                vec!["Brake".to_string()],
+                vec!["Speed".to_string()],
+            ],
+            "dragging down lands on the target index, not past it"
+        );
+
+        let mut docks = stub_docks();
+        assert!(reorder_docks(&mut docks, 2, 0));
+        assert_eq!(
+            docks,
+            vec![
+                vec!["Brake".to_string()],
+                vec!["Speed".to_string()],
+                vec!["Throttle".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn reorder_docks_keeps_every_dock_and_never_merges_them() {
+        // The whole point of the plain drag: nothing is combined.
+        let mut docks = stub_docks();
+        assert!(reorder_docks(&mut docks, 1, 0));
+        assert_eq!(docks.len(), 3);
+        assert!(docks.iter().all(|d| d.len() == 1));
+    }
+
+    #[test]
+    fn reorder_docks_is_a_no_op_for_a_self_move_or_an_out_of_range_index() {
+        let mut docks = stub_docks();
+        let before = docks.clone();
+        assert!(!reorder_docks(&mut docks, 1, 1));
+        assert!(!reorder_docks(&mut docks, 9, 0));
+        assert!(!reorder_docks(&mut docks, 0, 9));
+        assert_eq!(docks, before);
     }
 
     #[test]

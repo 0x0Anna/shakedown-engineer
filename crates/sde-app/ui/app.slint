@@ -67,8 +67,11 @@ component DockPanel {
     // This dock is the one currently being dragged by its header.
     in property <bool> dragging;
     // A drag (of some *other* dock) is currently hovering this one, so it
-    // is what a release right now would merge into.
+    // is what a release right now would act on.
     in property <bool> drop-highlight;
+    // Whether that release would merge into this dock (Ctrl held) rather
+    // than move the dragged dock into this position.
+    in property <bool> drop-merges;
 
     callback removed();
     callback cursor-moved(float); // fraction 0..1 across the graph width
@@ -77,10 +80,18 @@ component DockPanel {
     // Header-drag lifecycle. `drag-moved` reports the offset from where
     // the drag started plus this dock's own size, which is all Rust needs
     // to work out which dock is being hovered — see
-    // `graph::drag_drop_target`.
+    // `graph::drag_drop_target` — and whether Ctrl is held, which picks
+    // between reordering and merging.
     callback drag-started();
-    callback drag-moved(float, float, float, float); // dx, dy, cell width, cell height
+    callback drag-moved(float, float, float, float, bool); // dx, dy, cell width, cell height, ctrl held
     callback drag-ended();
+
+    // Whether Ctrl was held as of the last pointer event of this drag.
+    // Sampled from `pointer-event` (which carries live modifiers) rather
+    // than from `moved` (which carries none), and read back in `moved`,
+    // which Slint always fires immediately after the matching
+    // `PointerEventKind.move`.
+    private property <bool> ctrl-held;
 
     VerticalLayout {
         padding: 0px;
@@ -89,11 +100,13 @@ component DockPanel {
         HorizontalBox {
             padding: 0px;
             spacing: 8px;
-            // The dock's name doubles as its drag handle: press and drag
-            // it onto another dock to merge the two into one overlay
-            // group. Done with a plain TouchArea rather than Slint's
-            // DragArea/DropArea, whose payload type is only reachable
-            // through `slint::private_unstable_api`.
+            // The dock's name doubles as its drag handle: drag it onto
+            // another dock to move it into that position, or hold Ctrl to
+            // merge the two into one overlay group instead (matching the
+            // sidebar, where Ctrl+click already means "overlay"). Done
+            // with a plain TouchArea rather than Slint's DragArea/
+            // DropArea, whose payload type is only reachable through
+            // `slint::private_unstable_api`.
             TouchArea {
                 horizontal-stretch: 1;
                 min-height: 20px;
@@ -112,12 +125,13 @@ component DockPanel {
                 }
 
                 pointer-event(event) => {
+                    root.ctrl-held = event.modifiers.control;
                     if (event.kind == PointerEventKind.down) {
                         root.drag-started();
                     }
                     // `up` and `cancel` both end the drag; Rust decides
-                    // whether a merge actually happens from whichever
-                    // target the last `drag-moved` landed on, and a
+                    // what actually happens from whichever target and
+                    // modifier the last `drag-moved` reported, and a
                     // cancelled drag never moved far enough to have one.
                     if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
                         root.drag-ended();
@@ -129,7 +143,8 @@ component DockPanel {
                             (self.mouse-x - self.pressed-x) / 1px,
                             (self.mouse-y - self.pressed-y) / 1px,
                             root.width / 1px,
-                            root.height / 1px);
+                            root.height / 1px,
+                            root.ctrl-held);
                     }
                 }
             }
@@ -176,9 +191,16 @@ component DockPanel {
         }
 
         Rectangle {
-            background: root.drop-highlight ? #23303f : #1b1e24;
+            // Two visually distinct drops at the same drag geometry: a
+            // merge (Ctrl) tints the whole dock blue, since its contents
+            // are about to absorb the dragged one; a reorder only outlines
+            // it in amber, since nothing about its contents changes — it
+            // is just the position being landed on.
+            background: root.drop-highlight && root.drop-merges ? #23303f : #1b1e24;
             border-width: root.drop-highlight ? 2px : 1px;
-            border-color: root.drop-highlight ? #4ea1ff : #3a3f4b;
+            border-color: root.drop-highlight
+                ? (root.drop-merges ? #4ea1ff : #e6a44a)
+                : #3a3f4b;
             // The dock being dragged fades so the highlighted drop target
             // reads as the thing about to receive it.
             opacity: root.dragging ? 0.55 : 1.0;
@@ -287,6 +309,9 @@ export component AppWindow inherits Window {
     // (computed in Rust by `graph::drag_drop_target`).
     in property <int> dock-drag-source: -1;
     in property <int> dock-drag-target: -1;
+    // Whether releasing now would merge into `dock-drag-target` (Ctrl held)
+    // rather than move the dragged dock into that position.
+    in property <bool> dock-drag-merges: false;
 
     // -- callbacks into Rust --
     callback open-file();
@@ -297,8 +322,8 @@ export component AppWindow inherits Window {
     callback dock-selected(string); // toggles a channel in/out of the worksheet as its own dock
     callback dock-removed(int); // index into `docks`
     callback dock-drag-started(int); // index into `docks`: begin dragging that dock's header
-    callback dock-drag-moved(int, float, float, float, float); // source index, dx, dy, cell width, cell height
-    callback dock-drag-ended(); // merge into `dock-drag-target` if there is one, then clear the drag
+    callback dock-drag-moved(int, float, float, float, float, bool); // source index, dx, dy, cell width, cell height, ctrl held
+    callback dock-drag-ended(); // reorder into (or, with ctrl, merge into) `dock-drag-target` if there is one, then clear the drag
     callback channel-overlay-toggled(string); // toggles a channel in/out of the overlay queue
     callback overlay-add-requested(); // create one new dock overlaying the queued channels
     callback overlay-cleared(); // empty the overlay queue without creating a dock
@@ -734,11 +759,12 @@ export component AppWindow inherits Window {
                             cursor-value: i < root.cursor-values.length ? root.cursor-values[i] : "";
                             dragging: root.dock-drag-source == i;
                             drop-highlight: root.dock-drag-target == i;
+                            drop-merges: root.dock-drag-merges;
                             removed => { root.dock-removed(i); }
                             cursor-moved(f) => { root.cursor-moved(f); }
                             zoom-scrolled(dx, dy, f) => { root.zoom-scrolled(dx, dy, f); }
                             drag-started => { root.dock-drag-started(i); }
-                            drag-moved(dx, dy, w, h) => { root.dock-drag-moved(i, dx, dy, w, h); }
+                            drag-moved(dx, dy, w, h, ctrl) => { root.dock-drag-moved(i, dx, dy, w, h, ctrl); }
                             drag-ended => { root.dock-drag-ended(); }
                         }
                     }
@@ -758,11 +784,12 @@ export component AppWindow inherits Window {
                             cursor-value: i < root.cursor-values.length ? root.cursor-values[i] : "";
                             dragging: root.dock-drag-source == i;
                             drop-highlight: root.dock-drag-target == i;
+                            drop-merges: root.dock-drag-merges;
                             removed => { root.dock-removed(i); }
                             cursor-moved(f) => { root.cursor-moved(f); }
                             zoom-scrolled(dx, dy, f) => { root.zoom-scrolled(dx, dy, f); }
                             drag-started => { root.dock-drag-started(i); }
-                            drag-moved(dx, dy, w, h) => { root.dock-drag-moved(i, dx, dy, w, h); }
+                            drag-moved(dx, dy, w, h, ctrl) => { root.dock-drag-moved(i, dx, dy, w, h, ctrl); }
                             drag-ended => { root.dock-drag-ended(); }
                         }
                     }
@@ -789,11 +816,12 @@ export component AppWindow inherits Window {
                             cursor-value: i < root.cursor-values.length ? root.cursor-values[i] : "";
                             dragging: root.dock-drag-source == i;
                             drop-highlight: root.dock-drag-target == i;
+                            drop-merges: root.dock-drag-merges;
                             removed => { root.dock-removed(i); }
                             cursor-moved(f) => { root.cursor-moved(f); }
                             zoom-scrolled(dx, dy, f) => { root.zoom-scrolled(dx, dy, f); }
                             drag-started => { root.dock-drag-started(i); }
-                            drag-moved(dx, dy, w, h) => { root.dock-drag-moved(i, dx, dy, w, h); }
+                            drag-moved(dx, dy, w, h, ctrl) => { root.dock-drag-moved(i, dx, dy, w, h, ctrl); }
                             drag-ended => { root.dock-drag-ended(); }
                         }
                     }

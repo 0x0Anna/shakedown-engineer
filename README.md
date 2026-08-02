@@ -24,8 +24,9 @@ Milestones 1–6 done:
 
 - **Telemetry parsing** — MoTeC `.ld` (+ the `.ldx` lap sidecar), iRacing `.ibt`,
   shtep, and NGP's native `.tsv`, behind one `sde-core::Session` model.
-- **GUI** — worksheets of channel docks (drag a dock's header onto another to
-  merge them into one overlay group), channel search, lap selection and
+- **GUI** — worksheets of channel docks (drag a dock by its header to reorder
+  it, or Ctrl+drag to merge it into another as an overlay group), channel
+  search, lap selection and
   comparison, math channels, timeline zoom/pan, and a time-or-distance x-axis.
 - **RBR/RSF integration** — install-root discovery, replay `.rpl`/`.ini`
   metadata, and a cross-check of the replay's recovery spots against the
