@@ -774,6 +774,47 @@ Subaru_WRX_STI/*.ibt`) before writing any Rust:
      reaching `graph::zoom_scroll` — not just "which effect wins" but "the
      other axis's input is discarded outright" — so off-axis jitter can't
      leak through even partially.
+
+   *(Interaction pass, 2026-08-02 — from live testing feedback on a real
+   RBR session):* three fixes/additions, all reported as "the UI does seem
+   quirky".
+   - **Setup panel didn't render.** The panel was wrapped in an `if
+     root.setup-panel-visible:` inside the worksheet's `HorizontalBox`, so
+     toggling it added/removed a layout *child* rather than resizing one.
+     Now always instantiated and collapsed instead (`width:
+     root.setup-panel-visible ? 340px : 0px; visible: ...`), matching how
+     the sidebar — which never had the problem — sits in the same layout.
+   - **Zoom/pan glitchiness.** Two causes. (a) The zoom applied a flat
+     `0.9`/`1/0.9` factor per *event*, which is right for a mouse wheel
+     (one event = one 120-unit notch) but wildly wrong for a trackpad
+     emitting ~20 fractional-notch events per swipe: `0.9^20 ≈ 0.12`, a
+     ~8x zoom from one gesture. Zoom (and pan) are now proportional to
+     `delta / WHEEL_NOTCH`, so a notch does exactly what it always did and
+     a partial notch does proportionally less. (b) The axis lock above
+     decided from the gesture's *first* event, which on a trackpad is
+     often a couple of jittery pixels — an intended pan whose first event
+     favored vertical would zoom for the rest of the gesture.
+     `graph::ScrollGesture` now accumulates until `AXIS_LOCK_THRESHOLD`
+     (12) of movement before locking, then applies the accumulated delta
+     so nothing is lost to the wait. One wheel notch clears the threshold
+     immediately, so a mouse still zooms on its first event.
+   - **Drag a dock's header onto another to merge them into one overlay
+     group** — the requested answer to a worksheet cluttered with panels
+     that could be consolidated. Slint 1.17 does have `DragArea`/
+     `DropArea`, but their payload type is only reachable through
+     `slint::private_unstable_api`, so this uses a plain `TouchArea` on
+     the dock name (`MouseCursor.grab`) and puts the arithmetic in Rust
+     with the rest of the layout math. `graph::drag_drop_target` turns the
+     drag offset plus the dragged dock's own cell size into a target
+     index — every layout mode places docks on a fixed pitch, so no hit
+     testing in markup is needed — and `graph::merge_docks` folds the
+     source dock's channels into the target (skipping duplicates, keeping
+     the target's order) and drops the source. Both pure and unit tested,
+     including the grid's don't-wrap-off-the-edge case and the
+     rounds-to-zero case that makes a plain click on the handle harmless.
+     While dragging, the source fades and the hovered target gets a blue
+     border, driven by two `-1`-means-none int properties Rust pushes back
+     (`dock-drag-source`/`dock-drag-target`).
 6. **`sde-setup`** — setup sheet data model + diff view between two setups. First
    genuinely new (non-port) feature. *(Done, 2026-08-01 — see
    `crates/sde-setup`, `crates/sde-formats/rbr/src/setup.rs`,

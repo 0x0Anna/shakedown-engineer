@@ -109,6 +109,12 @@ struct AppState {
     /// Channels queued (via Ctrl+click in the sidebar) to become one new
     /// overlay dock once "Add overlay dock" is clicked; cleared after.
     overlay_pending: Vec<String>,
+    /// The dock whose header is currently being dragged, and the dock a
+    /// release would merge it into (`graph::drag_drop_target`'s answer for
+    /// the latest drag offset). Both index `dock_channels`; both `None`
+    /// when no drag is in progress or the drag is over no other dock.
+    dock_drag_source: Option<usize>,
+    dock_drag_target: Option<usize>,
     /// `0` = whole session ("All"); `n >= 1` selects `session.laps[n - 1]`
     /// (mirrors `graph::lap_labels`' indexing). Only consulted when
     /// `compare_lap_indices` is empty.
@@ -127,16 +133,16 @@ struct AppState {
     /// `None` rather than `Some((0.0, 1.0))` so "is a zoom active" is a
     /// simple `is_some()` check.
     zoom: Option<(f64, f64)>,
-    /// The axis (zoom vs. pan) the *current* scroll gesture is locked to,
-    /// and when its last event arrived. Trackpads report a nonzero
-    /// `delta_x`/`delta_y` on nearly every event even for an intended
-    /// single-axis swipe, so reading both every event would make an
-    /// intended pan also drift the zoom level (and vice versa). Locking
-    /// to whichever axis dominated the *first* event of a gesture, and
-    /// re-deciding only after a pause (see `SCROLL_GESTURE_TIMEOUT`),
-    /// keeps the whole gesture on one axis the way a trackpad user
-    /// expects.
-    scroll_gesture: Option<(graph::ScrollAxis, std::time::Instant)>,
+    /// The in-progress scroll gesture: which axis (zoom vs. pan) it has
+    /// locked to, and any movement accumulated while that was still
+    /// undecided. See `graph::ScrollGesture` for why both the lock and
+    /// the accumulation are needed on a trackpad.
+    scroll_gesture: graph::ScrollGesture,
+    /// When the last scroll event arrived, so a quiet period can end the
+    /// current gesture (see `SCROLL_GESTURE_TIMEOUT`). Kept next to
+    /// `scroll_gesture` rather than inside it so the gesture logic itself
+    /// stays pure and unit-testable, with no clock in it.
+    scroll_last_event: Option<std::time::Instant>,
     /// Time (default) or distance x-axis — see `graph::AxisMode`. Reset to
     /// `Time` on every file load; toggled independently of lap
     /// selection/zoom, both of which stay time-based regardless.
@@ -163,8 +169,11 @@ const SCROLL_GESTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 const VIEW_WIDTH: f64 = 1000.0;
 const VIEW_HEIGHT: f64 = 1000.0;
 /// Fixed column count for the "Grid" worksheet layout (see `app.slint`'s
-/// `DockData.grid-col`/`grid-row`).
-const GRID_COLUMNS: i32 = 2;
+/// `DockData.grid-col`/`grid-row`). Derived from `graph`'s copy rather
+/// than spelled out twice, since `graph::drag_drop_target` has to assume
+/// the exact same grid pitch to work out drop targets in that layout.
+#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+const GRID_COLUMNS: i32 = graph::DOCK_GRID_COLUMNS as i32;
 
 /// Where the install-root config file lives: `%APPDATA%\sde-app\` on
 /// Windows (this app's only target platform today — see `Cargo.toml`).
@@ -438,6 +447,85 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // -- header drag-and-drop: merge one dock into another --
+    //
+    // The three handlers are deliberately thin: all the geometry lives in
+    // `graph::drag_drop_target` and all the list surgery in
+    // `graph::merge_docks`, both pure and unit tested.
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_dock_drag_started(move |index| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let mut state_mut = state.borrow_mut();
+            state_mut.dock_drag_source = usize::try_from(index)
+                .ok()
+                .filter(|i| *i < state_mut.dock_channels.len());
+            state_mut.dock_drag_target = None;
+            drop(state_mut);
+            refresh_dock_drag_ui(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_dock_drag_moved(move |index, dx, dy, cell_width, cell_height| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let layout = graph::DockLayout::from_index(window.get_layout_mode());
+            let mut state_mut = state.borrow_mut();
+            // A `moved` can arrive without a preceding `down` having been
+            // recorded (a press that started before the dock existed);
+            // trust the index the event carries either way.
+            let Ok(source) = usize::try_from(index) else {
+                return;
+            };
+            state_mut.dock_drag_source = Some(source);
+            state_mut.dock_drag_target = graph::drag_drop_target(
+                layout,
+                source,
+                state_mut.dock_channels.len(),
+                f64::from(dx),
+                f64::from(dy),
+                f64::from(cell_width),
+                f64::from(cell_height),
+            );
+            drop(state_mut);
+            refresh_dock_drag_ui(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_dock_drag_ended(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let mut state_mut = state.borrow_mut();
+            let merged = match (state_mut.dock_drag_source, state_mut.dock_drag_target) {
+                (Some(source), Some(target)) => {
+                    graph::merge_docks(&mut state_mut.dock_channels, source, target)
+                }
+                // A press with no drag (or a drag that ended over nothing)
+                // just ends, leaving the worksheet as it was.
+                _ => false,
+            };
+            state_mut.dock_drag_source = None;
+            state_mut.dock_drag_target = None;
+            drop(state_mut);
+            refresh_dock_drag_ui(&window, &state);
+            if merged {
+                refresh_channel_list(&window, &state);
+                replot(&window, &state);
+            }
+        });
+    }
+
     {
         let window_weak = window.as_weak();
         let state = state.clone();
@@ -579,26 +667,28 @@ fn main() -> Result<(), slint::PlatformError> {
                 let mut state_mut = state.borrow_mut();
                 let (delta_x, delta_y) = (f64::from(delta_x), f64::from(delta_y));
 
+                // Scroll events carry no gesture start/end markers, so a
+                // quiet period is what ends one — after which the next
+                // event starts a fresh gesture free to lock to a different
+                // axis.
                 let now = std::time::Instant::now();
-                let axis = match state_mut.scroll_gesture {
-                    // Continuing a gesture still in progress: keep its
-                    // locked axis regardless of this event's own deltas.
-                    Some((axis, last)) if now.duration_since(last) < SCROLL_GESTURE_TIMEOUT => axis,
-                    // No gesture in progress (or the previous one timed
-                    // out): this event starts a new one, locked to
-                    // whichever axis it dominates.
-                    _ => graph::dominant_scroll_axis(delta_x, delta_y),
-                };
-                state_mut.scroll_gesture = Some((axis, now));
+                if state_mut
+                    .scroll_last_event
+                    .is_none_or(|last| now.duration_since(last) >= SCROLL_GESTURE_TIMEOUT)
+                {
+                    state_mut.scroll_gesture.reset();
+                }
+                state_mut.scroll_last_event = Some(now);
 
-                // Zero out the non-locked axis's delta entirely, rather
+                // The gesture zeroes the off-axis delta entirely, rather
                 // than just picking which effect to apply — trackpad
                 // jitter on the "wrong" axis shouldn't leak through even
-                // partially.
-                let (delta_x, delta_y) = match axis {
-                    graph::ScrollAxis::Zoom => (0.0, delta_y),
-                    graph::ScrollAxis::Pan => (delta_x, 0.0),
-                };
+                // partially — and returns (0, 0) until it has seen enough
+                // movement to know which axis the user means.
+                let (delta_x, delta_y) = state_mut.scroll_gesture.feed(delta_x, delta_y);
+                if delta_x == 0.0 && delta_y == 0.0 {
+                    return;
+                }
 
                 let current = state_mut.zoom.unwrap_or((0.0, 1.0));
                 let updated = graph::zoom_scroll(current, delta_x, delta_y, f64::from(fraction));
@@ -920,6 +1010,17 @@ fn current_range(session: &sde_core::Session, lap_index: usize) -> Option<(f64, 
     } else {
         Some(graph::session_time_range(session))
     }
+}
+
+/// Push the in-progress dock drag (which dock is being dragged, and which
+/// one a release would merge it into) into the window, so the markup can
+/// fade the source and highlight the target. `-1` for "none", since Slint
+/// has no optional int.
+fn refresh_dock_drag_ui(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
+    let state = state.borrow();
+    let as_index = |slot: Option<usize>| slot.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1);
+    window.set_dock_drag_source(as_index(state.dock_drag_source));
+    window.set_dock_drag_target(as_index(state.dock_drag_target));
 }
 
 /// Recompute the (filtered) channel list and which of those channels are

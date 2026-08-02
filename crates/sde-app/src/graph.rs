@@ -276,6 +276,92 @@ pub fn shared_duration(ranges: &[(f64, f64)]) -> f64 {
 /// division-by-near-zero window from runaway wheel-zooming.
 pub const MIN_ZOOM_WIDTH: f64 = 0.01;
 
+/// One mouse-wheel notch, in the scroll-delta units Slint reports. The
+/// platform convention every desktop toolkit follows; a trackpad reports
+/// fractions of it for a continuous swipe, which is exactly why
+/// [`zoom_scroll`] scales by `delta / WHEEL_NOTCH` rather than treating
+/// every event as one step.
+pub const WHEEL_NOTCH: f64 = 120.0;
+
+/// How much one full wheel notch zooms out (and its reciprocal, in).
+/// ~11% per notch, unchanged from the original flat per-event factor —
+/// what changed is that a partial notch now zooms proportionally less.
+pub const ZOOM_PER_NOTCH: f64 = 1.0 / 0.9;
+
+/// How far one full wheel notch pans, as a fraction of the visible
+/// window.
+pub const PAN_PER_NOTCH: f64 = 0.15;
+
+/// How much accumulated scroll movement a gesture needs before it locks
+/// to an axis (see [`ScrollGesture`]). One wheel notch (120) clears this
+/// immediately, so a mouse wheel still zooms on its very first event; a
+/// trackpad has to express a direction first.
+pub const AXIS_LOCK_THRESHOLD: f64 = 12.0;
+
+/// Accumulates scroll events into an axis-locked gesture.
+///
+/// Trackpads report a nonzero delta on *both* axes for nearly every
+/// event, even during an intentional single-axis swipe, so applying both
+/// would make a pan drift the zoom (and vice versa). Locking fixes that,
+/// but deciding the lock from the very first event — which is often a
+/// couple of jittery pixels — locks the wrong axis often enough to feel
+/// broken: an intended horizontal pan whose first event happened to
+/// favour vertical would zoom for the rest of the gesture instead.
+///
+/// So the decision waits until the gesture has accumulated
+/// [`AXIS_LOCK_THRESHOLD`] of movement, and the accumulated delta is then
+/// applied rather than discarded, so nothing is lost to the wait.
+#[derive(Debug, Clone, Default)]
+pub struct ScrollGesture {
+    axis: Option<ScrollAxis>,
+    pending_x: f64,
+    pending_y: f64,
+}
+
+impl ScrollGesture {
+    /// The axis this gesture is locked to, or `None` while still
+    /// undecided.
+    #[must_use]
+    pub fn axis(&self) -> Option<ScrollAxis> {
+        self.axis
+    }
+
+    /// End the current gesture, so the next event starts a fresh one.
+    /// Callers drive this from a quiet-period timeout — scroll events
+    /// carry no gesture start/end markers of their own.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Feed one scroll event; returns the `(delta_x, delta_y)` to apply,
+    /// with the off-axis component zeroed. `(0.0, 0.0)` while the gesture
+    /// is still below the lock threshold.
+    pub fn feed(&mut self, delta_x: f64, delta_y: f64) -> (f64, f64) {
+        self.pending_x += delta_x;
+        self.pending_y += delta_y;
+
+        let axis = match self.axis {
+            Some(axis) => axis,
+            None => {
+                if self.pending_x.abs().max(self.pending_y.abs()) < AXIS_LOCK_THRESHOLD {
+                    return (0.0, 0.0);
+                }
+                let axis = dominant_scroll_axis(self.pending_x, self.pending_y);
+                self.axis = Some(axis);
+                axis
+            }
+        };
+
+        let (x, y) = (self.pending_x, self.pending_y);
+        self.pending_x = 0.0;
+        self.pending_y = 0.0;
+        match axis {
+            ScrollAxis::Pan => (x, 0.0),
+            ScrollAxis::Zoom => (0.0, y),
+        }
+    }
+}
+
 /// Fully zoomed out is represented as `(0.0, 1.0)`; anything tighter is
 /// "zoomed in". Used to decide whether a zoom window is worth storing at
 /// all (vs. just clearing it back to "no zoom").
@@ -286,7 +372,7 @@ pub fn is_full_zoom(zoom: (f64, f64)) -> bool {
 
 /// Which effect a scroll gesture drives: zooming (vertical scroll) or
 /// panning (horizontal scroll). A gesture is locked to one axis for its
-/// whole duration (see `main.rs`'s `AppState::scroll_gesture_axis`) so
+/// whole duration (see `main.rs`'s `AppState::scroll_gesture`) so
 /// that trackpad diagonal jitter during an intended pan doesn't also
 /// nudge the zoom level, and vice versa.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,7 +418,18 @@ pub fn zoom_scroll(
         let width = end - start;
         // Positive `delta_y` is a scroll-down/away-from-user notch, which
         // by convention zooms out here; scroll-up/toward-user zooms in.
-        let factor = if delta_y > 0.0 { 1.0 / 0.9 } else { 0.9 };
+        //
+        // Scaled by how far the wheel/trackpad actually moved, not a flat
+        // per-event step: one mouse-wheel notch reports a full
+        // `WHEEL_NOTCH` of delta and should zoom one step, but a trackpad
+        // reports a stream of much smaller deltas for the same physical
+        // gesture. Stepping a flat factor per *event* made a trackpad
+        // swipe compound to an enormous zoom change (0.9^20 for a
+        // twenty-event flick) while a wheel notch moved one step — the
+        // same gesture meaning wildly different things per device.
+        // Exponentiating keeps it continuous: two half-notches zoom
+        // exactly as far as one whole one.
+        let factor = ZOOM_PER_NOTCH.powf(delta_y / WHEEL_NOTCH);
         let cursor_point = start + cursor_fraction * width;
         let new_width = (width * factor).clamp(MIN_ZOOM_WIDTH, 1.0);
         start = cursor_point - cursor_fraction * new_width;
@@ -342,9 +439,11 @@ pub fn zoom_scroll(
 
     if delta_x != 0.0 {
         let width = end - start;
-        // Sign/sensitivity is arbitrary (no physical unit to match); this
-        // just needs to feel proportional to how far/fast the user swipes.
-        let shift = (delta_x / 800.0) * width;
+        // Same per-notch treatment as the zoom above, for the same
+        // device-consistency reason. Numerically identical to the previous
+        // `delta_x / 800.0` at one full notch; the difference is only that
+        // a trackpad's fractional deltas now pan proportionally.
+        let shift = PAN_PER_NOTCH * (delta_x / WHEEL_NOTCH) * width;
         (start, end) = clamp_window(start + shift, end + shift);
     }
 
@@ -632,6 +731,118 @@ pub fn default_dock_channels(session: &sde_core::Session) -> Vec<Vec<String>> {
     } else {
         docks
     }
+}
+
+/// How the worksheet is arranging its docks. Mirrors `app.slint`'s
+/// `layout-mode` integer, which is what [`DockLayout::from_index`]
+/// converts — the markup keeps it as an int because it's plain UI state
+/// set by three toggle chips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockLayout {
+    Stacked,
+    SideBySide,
+    Grid,
+}
+
+impl DockLayout {
+    /// Anything unrecognized reads as [`Stacked`](DockLayout::Stacked),
+    /// which is the worksheet's default.
+    #[must_use]
+    pub fn from_index(index: i32) -> Self {
+        match index {
+            1 => Self::SideBySide,
+            2 => Self::Grid,
+            _ => Self::Stacked,
+        }
+    }
+}
+
+/// Columns in the "Grid" layout mode. Must match the `GRID_COLUMNS` that
+/// `main.rs` precomputes each dock's `grid-row`/`grid-col` against.
+pub const DOCK_GRID_COLUMNS: usize = 2;
+
+/// Which dock index a drag that started on dock `source` and has moved
+/// `(dx, dy)` pixels is currently over, or `None` if it's over the source
+/// itself, over empty space, or outside the worksheet.
+///
+/// Derived from the layout's own regular geometry rather than from hit
+/// testing in markup: every layout mode places docks on a fixed pitch, so
+/// the dragged panel's own `(cell_width, cell_height)` is enough to turn a
+/// pixel delta into a whole number of cells moved. That keeps the
+/// arithmetic here — pure and testable — instead of in `app.slint`, which
+/// is the same split the rest of the layout math already uses (see
+/// `DockData::grid-row`/`grid-col`).
+///
+/// Rounding to the nearest cell also gives the click/drag distinction for
+/// free: a drag too short to reach a neighbouring cell rounds to zero
+/// cells moved, lands back on `source`, and yields `None`.
+#[must_use]
+pub fn drag_drop_target(
+    layout: DockLayout,
+    source: usize,
+    dock_count: usize,
+    dx: f64,
+    dy: f64,
+    cell_width: f64,
+    cell_height: f64,
+) -> Option<usize> {
+    if source >= dock_count || cell_width <= 0.0 || cell_height <= 0.0 {
+        return None;
+    }
+
+    // The delta is bounded by the window size and the cell by the dock
+    // size, so the quotient can't approach i64's range.
+    #[allow(clippy::cast_possible_truncation)]
+    let steps = |delta: f64, cell: f64| (delta / cell).round() as i64;
+
+    let source_index = i64::try_from(source).ok()?;
+    let count = i64::try_from(dock_count).ok()?;
+    let columns = i64::try_from(DOCK_GRID_COLUMNS).ok()?;
+
+    let target = match layout {
+        DockLayout::Stacked => source_index + steps(dy, cell_height),
+        DockLayout::SideBySide => source_index + steps(dx, cell_width),
+        DockLayout::Grid => {
+            // A grid drag has to track both axes, and a sideways drag off
+            // either edge is *not* a wrap onto the neighbouring row — the
+            // user dragged into empty space, so nothing is targeted.
+            let column = source_index % columns + steps(dx, cell_width);
+            let row = source_index / columns + steps(dy, cell_height);
+            if column < 0 || column >= columns || row < 0 {
+                return None;
+            }
+            row * columns + column
+        }
+    };
+
+    if target == source_index || target < 0 || target >= count {
+        return None;
+    }
+    usize::try_from(target).ok()
+}
+
+/// Fold dock `source`'s channels into dock `target` (an overlay group)
+/// and drop the now-empty source dock, reporting whether anything
+/// changed.
+///
+/// Channels `target` already plots are skipped rather than duplicated —
+/// dropping a dock onto one that overlaps it shouldn't plot the same
+/// trace twice — and the merged dock keeps `target`'s channel order with
+/// the new ones appended, so the drop target stays recognizably itself.
+pub fn merge_docks(docks: &mut Vec<Vec<String>>, source: usize, target: usize) -> bool {
+    if source == target || source >= docks.len() || target >= docks.len() {
+        return false;
+    }
+
+    let moved = docks.remove(source);
+    // Removing the source shifts every later dock down one.
+    let target = if target > source { target - 1 } else { target };
+    for name in moved {
+        if !docks[target].contains(&name) {
+            docks[target].push(name);
+        }
+    }
+    true
 }
 
 /// All channel names in `session`, sorted alphabetically — the unfiltered
@@ -996,17 +1207,20 @@ mod tests {
 
     #[test]
     fn zoom_scroll_out_widens_and_clamps_to_full_range() {
-        let zoomed = zoom_scroll((0.4, 0.6), 0.0, 1.0, 0.5);
+        let zoomed = zoom_scroll((0.4, 0.6), 0.0, WHEEL_NOTCH, 0.5);
         assert!(zoomed.1 - zoomed.0 > 0.2);
-        let very_zoomed_out = zoom_scroll((0.0, 1.0), 0.0, 1.0, 0.5);
+        let very_zoomed_out = zoom_scroll((0.0, 1.0), 0.0, WHEEL_NOTCH, 0.5);
         assert_eq!(very_zoomed_out, (0.0, 1.0));
     }
 
     #[test]
     fn zoom_scroll_never_narrows_past_the_minimum_width() {
+        // Full notches, not a delta of 1.0: now that a step is
+        // proportional to the delta, 200 one-unit events barely zoom at
+        // all and wouldn't reach the clamp this test exists to check.
         let mut window = (0.0, 1.0);
         for _ in 0..200 {
-            window = zoom_scroll(window, 0.0, -1.0, 0.5);
+            window = zoom_scroll(window, 0.0, -WHEEL_NOTCH, 0.5);
         }
         assert!(window.1 - window.0 >= MIN_ZOOM_WIDTH - 1e-9);
     }
@@ -1025,6 +1239,93 @@ mod tests {
         assert!((after.0 - 0.0).abs() < 1e-6 && (after.1 - 0.2).abs() < 1e-6); // left edge
         let after = zoom_scroll((0.8, 1.0), 10_000.0, 0.0, 0.5);
         assert!((after.0 - 0.8).abs() < 1e-6 && (after.1 - 1.0).abs() < 1e-6); // right edge
+    }
+
+    #[test]
+    fn zoom_step_is_proportional_to_how_far_the_wheel_moved() {
+        // The bug this guards: a flat per-event factor meant a trackpad,
+        // which reports many small deltas for one physical swipe, zoomed
+        // vastly further than a mouse wheel doing "the same" gesture.
+        let one_notch = zoom_scroll((0.0, 1.0), 0.0, -WHEEL_NOTCH, 0.5);
+        let mut ten_tenths = (0.0, 1.0);
+        for _ in 0..10 {
+            ten_tenths = zoom_scroll(ten_tenths, 0.0, -WHEEL_NOTCH / 10.0, 0.5);
+        }
+        let (a, b) = (one_notch.1 - one_notch.0, ten_tenths.1 - ten_tenths.0);
+        assert!(
+            (a - b).abs() < 1e-9,
+            "one notch ({a}) should zoom as far as ten tenths of one ({b})"
+        );
+        // And one notch is the ~11% step it always was.
+        assert!(
+            (a - 0.9).abs() < 1e-9,
+            "one notch should zoom in ~10%, got {a}"
+        );
+    }
+
+    #[test]
+    fn pan_step_is_proportional_to_how_far_the_wheel_moved() {
+        let before = (0.4, 0.6);
+        let one_notch = zoom_scroll(before, WHEEL_NOTCH, 0.0, 0.5);
+        let mut ten_tenths = before;
+        for _ in 0..10 {
+            ten_tenths = zoom_scroll(ten_tenths, WHEEL_NOTCH / 10.0, 0.0, 0.5);
+        }
+        assert!((one_notch.0 - ten_tenths.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_gesture_waits_for_a_clear_direction_before_locking_an_axis() {
+        let mut gesture = ScrollGesture::default();
+        // Trackpad jitter: tiny, and vertical-dominant at first, but the
+        // user is swiping horizontally. Nothing is applied yet...
+        assert_eq!(gesture.feed(1.0, 2.0), (0.0, 0.0));
+        assert_eq!(gesture.axis(), None);
+        // ...and once the direction is clear, the gesture locks to pan,
+        // *including* the movement accumulated during the wait.
+        let (dx, dy) = gesture.feed(11.0, 1.0);
+        assert_eq!(gesture.axis(), Some(ScrollAxis::Pan));
+        assert_eq!((dx, dy), (12.0, 0.0));
+    }
+
+    #[test]
+    fn a_locked_gesture_ignores_off_axis_jitter_for_its_whole_duration() {
+        let mut gesture = ScrollGesture::default();
+        gesture.feed(0.0, -WHEEL_NOTCH); // one wheel notch: locks to zoom at once
+        assert_eq!(gesture.axis(), Some(ScrollAxis::Zoom));
+        // A later event that's *mostly horizontal* still can't pan.
+        assert_eq!(gesture.feed(50.0, -2.0), (0.0, -2.0));
+    }
+
+    #[test]
+    fn a_wheel_notch_locks_and_applies_immediately() {
+        // A mouse wheel reports one big delta per notch; waiting for a
+        // second event before acting would feel like a dropped input.
+        let mut gesture = ScrollGesture::default();
+        assert_eq!(gesture.feed(0.0, WHEEL_NOTCH), (0.0, WHEEL_NOTCH));
+    }
+
+    #[test]
+    fn resetting_a_gesture_lets_the_next_one_pick_a_different_axis() {
+        let mut gesture = ScrollGesture::default();
+        gesture.feed(0.0, WHEEL_NOTCH);
+        assert_eq!(gesture.axis(), Some(ScrollAxis::Zoom));
+        gesture.reset();
+        assert_eq!(gesture.axis(), None);
+        gesture.feed(WHEEL_NOTCH, 0.0);
+        assert_eq!(gesture.axis(), Some(ScrollAxis::Pan));
+    }
+
+    #[test]
+    fn accumulated_jitter_that_never_gets_anywhere_stays_unapplied() {
+        // Idle hand resting on a trackpad: sub-threshold noise in both
+        // directions must not eventually add up into a zoom.
+        let mut gesture = ScrollGesture::default();
+        for _ in 0..20 {
+            assert_eq!(gesture.feed(0.3, -0.3), (0.0, 0.0));
+            assert_eq!(gesture.feed(-0.3, 0.3), (0.0, 0.0));
+        }
+        assert_eq!(gesture.axis(), None);
     }
 
     #[test]
@@ -1345,6 +1646,159 @@ mod tests {
     fn default_dock_channels_empty_for_a_session_with_no_channels_at_all() {
         let session = session_with(vec![]);
         assert!(default_dock_channels(&session).is_empty());
+    }
+
+    #[test]
+    fn drag_drop_target_stacked_counts_whole_rows_moved() {
+        // 4 docks stacked, 160px rows, dragging dock 1.
+        let target = |dy| drag_drop_target(DockLayout::Stacked, 1, 4, 0.0, dy, 400.0, 160.0);
+        assert_eq!(target(160.0), Some(2));
+        assert_eq!(target(-160.0), Some(0));
+        assert_eq!(target(330.0), Some(3), "two rows down, plus a bit");
+        // Horizontal movement is meaningless in a single-column layout.
+        assert_eq!(
+            drag_drop_target(DockLayout::Stacked, 1, 4, 900.0, 0.0, 400.0, 160.0),
+            None
+        );
+    }
+
+    #[test]
+    fn drag_drop_target_is_none_for_a_drag_too_short_to_leave_its_own_cell() {
+        // This is what makes a plain click on the drag handle harmless.
+        assert_eq!(
+            drag_drop_target(DockLayout::Stacked, 1, 4, 0.0, 3.0, 400.0, 160.0),
+            None
+        );
+        assert_eq!(
+            drag_drop_target(DockLayout::SideBySide, 1, 4, -5.0, 0.0, 200.0, 400.0),
+            None
+        );
+    }
+
+    #[test]
+    fn drag_drop_target_clamps_to_the_docks_that_exist() {
+        assert_eq!(
+            drag_drop_target(DockLayout::Stacked, 2, 3, 0.0, 800.0, 400.0, 160.0),
+            None,
+            "dragging below the last dock targets nothing"
+        );
+        assert_eq!(
+            drag_drop_target(DockLayout::Stacked, 0, 3, 0.0, -800.0, 400.0, 160.0),
+            None,
+            "dragging above the first dock targets nothing"
+        );
+    }
+
+    #[test]
+    fn drag_drop_target_side_by_side_counts_whole_columns_moved() {
+        let target = |dx| drag_drop_target(DockLayout::SideBySide, 0, 3, dx, 0.0, 200.0, 400.0);
+        assert_eq!(target(200.0), Some(1));
+        assert_eq!(target(420.0), Some(2));
+        assert_eq!(target(-200.0), None);
+    }
+
+    #[test]
+    fn drag_drop_target_grid_tracks_both_axes() {
+        // 5 docks in a 2-wide grid (rows 0,1,2), 300x200 cells, dragging
+        // dock 1 (row 0, col 1).
+        let target = |dx, dy| drag_drop_target(DockLayout::Grid, 1, 5, dx, dy, 300.0, 200.0);
+        assert_eq!(target(-300.0, 0.0), Some(0));
+        assert_eq!(target(0.0, 200.0), Some(3));
+        assert_eq!(target(-300.0, 400.0), Some(4));
+    }
+
+    #[test]
+    fn drag_drop_target_grid_does_not_wrap_off_the_edge_onto_another_row() {
+        // Dock 1 is in the right-hand column; dragging further right is
+        // empty space, not dock 2 (which is the *next row's* left cell).
+        assert_eq!(
+            drag_drop_target(DockLayout::Grid, 1, 5, 300.0, 0.0, 300.0, 200.0),
+            None
+        );
+        assert_eq!(
+            drag_drop_target(DockLayout::Grid, 0, 5, -300.0, 0.0, 300.0, 200.0),
+            None
+        );
+    }
+
+    #[test]
+    fn drag_drop_target_rejects_a_degenerate_cell_size() {
+        // Before the first layout pass a dock can report zero size.
+        assert_eq!(
+            drag_drop_target(DockLayout::Stacked, 0, 3, 0.0, 100.0, 0.0, 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn merge_docks_appends_the_source_channels_and_removes_the_source() {
+        let mut docks = vec![
+            vec!["Speed".to_string()],
+            vec!["Throttle".to_string()],
+            vec!["Brake".to_string()],
+        ];
+        assert!(merge_docks(&mut docks, 2, 0));
+        assert_eq!(
+            docks,
+            vec![
+                vec!["Speed".to_string(), "Brake".to_string()],
+                vec!["Throttle".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_docks_targets_the_right_dock_when_the_source_precedes_it() {
+        // The removal shifts later docks down one — the target has to
+        // follow it, or the channels land on the wrong dock.
+        let mut docks = vec![
+            vec!["Speed".to_string()],
+            vec!["Throttle".to_string()],
+            vec!["Brake".to_string()],
+        ];
+        assert!(merge_docks(&mut docks, 0, 2));
+        assert_eq!(
+            docks,
+            vec![
+                vec!["Throttle".to_string()],
+                vec!["Brake".to_string(), "Speed".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_docks_does_not_duplicate_a_channel_the_target_already_plots() {
+        let mut docks = vec![
+            vec!["Speed".to_string(), "Throttle".to_string()],
+            vec!["Throttle".to_string(), "Brake".to_string()],
+        ];
+        assert!(merge_docks(&mut docks, 1, 0));
+        assert_eq!(
+            docks,
+            vec![vec![
+                "Speed".to_string(),
+                "Throttle".to_string(),
+                "Brake".to_string()
+            ]]
+        );
+    }
+
+    #[test]
+    fn merge_docks_is_a_no_op_for_a_self_merge_or_an_out_of_range_index() {
+        let mut docks = vec![vec!["Speed".to_string()], vec!["Throttle".to_string()]];
+        let before = docks.clone();
+        assert!(!merge_docks(&mut docks, 1, 1));
+        assert!(!merge_docks(&mut docks, 5, 0));
+        assert!(!merge_docks(&mut docks, 0, 5));
+        assert_eq!(docks, before);
+    }
+
+    #[test]
+    fn dock_layout_from_index_maps_the_slint_layout_mode_ints() {
+        assert_eq!(DockLayout::from_index(0), DockLayout::Stacked);
+        assert_eq!(DockLayout::from_index(1), DockLayout::SideBySide);
+        assert_eq!(DockLayout::from_index(2), DockLayout::Grid);
+        assert_eq!(DockLayout::from_index(-1), DockLayout::Stacked);
     }
 
     /// End-to-end sanity check against the real synthetic fixture used by
