@@ -20,22 +20,41 @@ scope and design decisions — this README is just the quick-start.
 
 ## Status
 
-Milestone 1–5 done: MoTeC `.ld` parsing, the core session data model, and a Slint GUI
-with worksheets/docks, channel search, lap selection/comparison, math channels, and
-timeline zoom/pan. See `PROJECT_PLAN.md`'s milestone checklist for current progress.
+Milestones 1–6 done:
+
+- **Telemetry parsing** — MoTeC `.ld` (+ the `.ldx` lap sidecar), iRacing `.ibt`,
+  shtep, and NGP's native `.tsv`, behind one `sde-core::Session` model.
+- **GUI** — worksheets of channel docks (drag a dock's header onto another to
+  merge them into one overlay group), channel search, lap selection and
+  comparison, math channels, timeline zoom/pan, and a time-or-distance x-axis.
+- **RBR/RSF integration** — install-root discovery, replay `.rpl`/`.ini`
+  metadata, and a cross-check of the replay's recovery spots against the
+  telemetry's own time penalties.
+- **Setups** — a `.lsp` parser, a sim-agnostic setup model, a diff engine, and
+  a setup panel that auto-resolves the loaded run's sheet and can show only
+  what differs from another.
+
+Next is `sde-analysis` (milestone 7): damper velocity histograms, ABS/TC
+intervention stats, ride-height/roll estimates, brake bias effectiveness. See
+`PROJECT_PLAN.md` — its "Where things stand / what to pick up next" section is
+kept current, and the milestone list below it has the full detail.
 
 ## Workspace layout
 
 ```
 crates/
-├── sde-formats/motec/   # MoTeC .ld binary parser (binrw-based), UI-free
+├── sde-formats/motec/   # MoTeC .ld binary parser (binrw-based) + .ldx sidecar, UI-free
+├── sde-formats/ibt/     # iRacing .ibt parser
+├── sde-formats/shtep/   # SimHub telemetry export parser
+├── sde-formats/rbr/     # RBR/RSF companion files: install paths, replay .ini, .lsp setups, .tsv
 ├── sde-core/            # Session/Channel/Lap data model, wraps sde-formats
-├── sde-cli/             # `dump_channels` example binary
-└── sde-app/             # Slint GUI shell
+├── sde-setup/           # Sim-agnostic setup model + diff engine, and the RBR adapter
+├── sde-cli/             # `dump_channels` and `diff_setups` example binaries
+└── sde-app/             # Slint GUI shell — the only crate that depends on Slint
 ```
 
-Future crates (not yet started): `sde-setup`, `sde-analysis`, `sde-gis`, `sde-video`,
-and additional `sde-formats::<format>` parsers.
+Future crates (not yet started): `sde-analysis`, `sde-gis`, `sde-video`, and
+additional `sde-formats::<format>` parsers (XRK, VBOX, ADULOG, RUN, MLG).
 
 ## Building
 
@@ -56,6 +75,13 @@ cargo run -p sde-cli --bin dump_channels -- path/to/log.ld
 Prints driver/vehicle/venue metadata, lap count, and each channel's name, unit,
 sample count, and first few values.
 
+```sh
+cargo run -p sde-cli --bin diff_setups -- path/to/setup.lsp [path/to/other.lsp]
+```
+
+With one path, prints the setup sheet; with two, prints only the values that
+differ, with deltas and percentages.
+
 ## Contributing
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for build/test/lint requirements and workspace
@@ -71,4 +97,4 @@ for details on how each was used):
 - `../ldparser` — independent MoTeC LD parser, used for cross-validation and to
   generate synthetic test fixtures.
 - `../race-engineer` — RBR domain model reference (`docs/data-model-rbr.md`) for the
-  future `sde-formats::rbr` setup-file adapter.
+  `sde-formats::rbr` / `sde-setup::rbr` setup-file adapters.

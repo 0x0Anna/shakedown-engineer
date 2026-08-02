@@ -36,6 +36,76 @@ the port faithfully; new *feature* work goes into the rally-focused crates above
   native Rust (`three-d` or `wgpu`), to avoid breaking the modular crate architecture and
   avoid a second UI paradigm/process alongside Slint.
 
+## Where things stand / what to pick up next *(updated 2026-08-02)*
+
+A running "you are here" pointer, so a session starting cold doesn't have to
+reconstruct the state from the milestone list below. **Update this section
+whenever a milestone closes or a new blocker appears** — the detail belongs in
+the milestone entries and design notes; this is only the index into them.
+
+**Done:** milestones 1–6. Telemetry parsing (MoTeC `.ld` + `.ldx`, iRacing
+`.ibt`, shtep, NGP `.tsv`), `sde-core::Session`, the Slint app with
+worksheets/docks/lap comparison/math channels/zoom-pan, RBR install discovery +
+replay `.ini` pairing + recovery cross-check, and `sde-setup` (`.lsp` parser,
+sim-agnostic model, diff engine, CLI + app panel).
+
+**Open branch:** `milestone-6-sde-setup` -> PR #12, which carries milestone 6
+plus the 2026-08-02 interaction pass (setup panel relayout, proportional
+zoom/pan with deferred axis locking, drag-a-dock-header-onto-another to merge
+into an overlay group).
+
+**Next up, in the order they make sense:**
+
+1. **Eyeball PR #12 before merging.** The setup-panel relayout and the
+   drag-to-merge feel are reasoned from the markup and Slint's input source,
+   and are covered by unit tests on the *arithmetic*, but neither has been
+   watched on screen. Everything else in the PR has been verified against the
+   real `.sample-data/` captures.
+2. **Milestone 7, `sde-analysis`** — the next planned milestone and the one
+   the whole race-engineer motivation points at: damper velocity histograms,
+   ABS/TC intervention markers and stats, ride-height/roll estimates, brake
+   bias effectiveness. Nothing blocks it; `sde-core::Session` and the math
+   channel machinery are both in place.
+3. **Second half of design-note principle 8** — pairing the setup diff with a
+   *performance* delta trace. Deliberately deferred out of milestone 6 because
+   it needs the app to hold **two loaded sessions** at once, which `AppState`
+   currently isn't shaped for (one `session: Option<Session>`). That reshape
+   is the real work; the setup diff itself is done.
+
+**Known gaps worth recording (none blocking):**
+
+- **Dock drags merge but never reorder.** `graph::drag_drop_target` returns a
+  target index and `merge_docks` always folds source into target — there's no
+  gesture for moving a dock to a different position, or for splitting a merged
+  overlay group back apart (the only exit is removing the whole dock with its
+  "x" and re-adding the channels). If reordering is wanted, the natural shape
+  is a modifier key or a drop-between-docks zone distinguishing "reorder" from
+  "merge" at the same drag geometry.
+- The stacked layout's `ListView` would normally steal a drag past 8px and
+  cancel the dragged header's grab; it doesn't only because Slint's
+  `ScrollView` defaults to `interactive: false` (drag-to-pan off). If that
+  scroll behaviour is ever changed, header dragging in stacked mode breaks —
+  see the interaction-pass notes under milestone 5.
+- No settings screen. The install root persists
+  (`%APPDATA%\sde-app\install_root.txt`) but nothing else does — no saved
+  worksheet layouts, no window state.
+- Telemetry files and replay `.ini`s are still paired by hand in the app
+  (`refresh_setup_panel` auto-resolves the *setup* from a loaded replay, but
+  the replay itself is a manual pick, and auto-matching by modification time
+  is only a fallback). No known filename/folder convention exists to pair
+  them reliably — see the open-task list at the bottom.
+- No genuine MoTeC-hardware `.ld` has ever been tested, so the nonzero-`shift`
+  conversion formula remains unverified against real hardware. Every file
+  tested so far (synthetic fixture, ACC export, RSF capture) has
+  `shift == 0`.
+
+**House rules that aren't in the code:** every change goes on a branch with a
+PR, never straight to `main`. `sde-formats`/`sde-core` stay UI-free and
+dependency-light; `sde-app` is the only crate allowed to depend on Slint, and
+arithmetic belongs in Rust, not in `.slint` markup. On-disk tests run against
+the gitignored `.sample-data/` when it's present and return early when it
+isn't, so CI stays green without it.
+
 ## Tech stack decisions
 
 - **Language:** Rust (workspace of multiple crates).
