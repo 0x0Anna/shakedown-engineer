@@ -2,7 +2,7 @@
 //! `Session` data-model boundary works, ahead of any GUI (milestone 2's
 //! goal per PROJECT_PLAN.md).
 //!
-//! Usage: `dump_channels <path-to-file.ld|.ibt>`
+//! Usage: `dump_channels <path-to-file.ld|.ibt|.tsv>`
 
 // `doc_markdown`: fires on the plain-English `PROJECT_PLAN.md` mention
 // above; not worth backtick-wrapping for a doc-only lint.
@@ -21,19 +21,19 @@ fn main() -> ExitCode {
     let path = match args.next() {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("usage: dump_channels <path-to-file.ld|.ibt>");
+            eprintln!("usage: dump_channels <path-to-file.ld|.ibt|.tsv>");
             return ExitCode::FAILURE;
         }
     };
 
-    let is_ibt = path
+    let ext = path
         .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("ibt"));
+        .map(|ext| ext.to_string_lossy().to_lowercase());
 
-    let session = if is_ibt {
-        sde_core::Session::load_ibt(&path).map_err(|e| e.to_string())
-    } else {
-        sde_core::Session::load_motec(&path).map_err(|e| e.to_string())
+    let session = match ext.as_deref() {
+        Some("ibt") => sde_core::Session::load_ibt(&path).map_err(|e| e.to_string()),
+        Some("tsv") => sde_core::Session::load_shtep(&path).map_err(|e| e.to_string()),
+        _ => sde_core::Session::load_motec(&path).map_err(|e| e.to_string()),
     };
     let session = match session {
         Ok(s) => s,

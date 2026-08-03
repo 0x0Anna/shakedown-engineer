@@ -1,4 +1,4 @@
-//! Slint GUI shell: load a MoTeC `.ld` or iRacing `.ibt` file, search/pick channels to add
+//! Slint GUI shell: load a MoTeC `.ld`, iRacing `.ibt`, or `shtep` `.tsv` file, search/pick channels to add
 //! to a worksheet of stacked line-graph docks, optionally restrict the
 //! view to a single lap (or overlay several laps for comparison), and
 //! drag a shared vertical time cursor over the docks. See
@@ -246,10 +246,11 @@ fn main() -> Result<(), slint::PlatformError> {
             };
 
             let mut dialog = rfd::FileDialog::new()
-                .add_filter("Telemetry log", &["ld", "ibt"])
+                .add_filter("Telemetry log", &["ld", "ibt", "tsv"])
                 .add_filter("MoTeC log", &["ld"])
                 .add_filter("iRacing telemetry", &["ibt"])
-                .set_title("Open a .ld or .ibt telemetry log");
+                .add_filter("shtep TSV export", &["tsv"])
+                .set_title("Open a .ld, .ibt, or .tsv telemetry log");
             if let Some(dir) = state
                 .borrow()
                 .install_paths
@@ -1345,16 +1346,16 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
         |n| n.to_string_lossy().to_string(),
     );
 
-    // Dispatch on extension, matching `sde-cli`'s `dump_channels` — both
+    // Dispatch on extension, matching `sde-cli`'s `dump_channels` — all
     // format loaders return their own error type, so map to `String`
-    // early to keep this branch's two arms the same type.
-    let is_ibt = path
+    // early to keep this match's arms the same type.
+    let ext = path
         .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("ibt"));
-    let load_result = if is_ibt {
-        sde_core::Session::load_ibt(path).map_err(|e| e.to_string())
-    } else {
-        sde_core::Session::load_motec(path).map_err(|e| e.to_string())
+        .map(|ext| ext.to_string_lossy().to_lowercase());
+    let load_result = match ext.as_deref() {
+        Some("ibt") => sde_core::Session::load_ibt(path).map_err(|e| e.to_string()),
+        Some("tsv") => sde_core::Session::load_shtep(path).map_err(|e| e.to_string()),
+        _ => sde_core::Session::load_motec(path).map_err(|e| e.to_string()),
     };
 
     let session = match load_result {
