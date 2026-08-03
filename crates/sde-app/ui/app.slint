@@ -272,7 +272,7 @@ export component AppWindow inherits Window {
 
     // -- state provided by Rust --
     in property <string> window-title: "sde-app — No file loaded";
-    in property <string> status-text: "Open a .ld or .ibt telemetry log to begin.";
+    in property <string> status-text: "Open a .ld, .ibt, or .tsv telemetry log to begin.";
     in property <bool> cursor-visible: false;
     in property <float> cursor-fraction: 0; // 0..1 across the plotted x range
     in property <string> cursor-time-text: "";
@@ -848,12 +848,27 @@ export component AppWindow inherits Window {
             // ordinary relayout trigger with no element construction
             // involved, and matches how the sidebar (which never had this
             // problem) sits in the same layout.
+            //
+            // `clip: true` plus a fixed-width inner `VerticalBox` (rather
+            // than `width: 100%`, which would go to 0 along with the
+            // outer `Rectangle`): collapsing the *content*'s own width to
+            // 0 made its `wrap: word-wrap` subtitle `Text` measure its
+            // wrap against a 0px line, which Slint computed as an
+            // extremely tall (near-unbounded) preferred height — and
+            // since `visible: false` keeps the element in the layout
+            // tree (unlike `if`), that inflated height became the whole
+            // window's minimum height, blocking vertical resize and
+            // making the window open taller than the display. Keeping
+            // the inner content at its expanded width at all times avoids
+            // the pathological wrap, while `clip: true` still hides it
+            // when the outer `Rectangle` collapses.
             Rectangle {
                 width: root.setup-panel-visible ? 340px : 0px;
                 visible: root.setup-panel-visible;
+                clip: true;
 
                 VerticalBox {
-                    width: 100%;
+                    width: 340px;
                     height: 100%;
                     padding: 0px;
                     spacing: 4px;
