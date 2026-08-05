@@ -170,6 +170,27 @@ pub fn parse_str(
 /// `CultureInfo.InvariantCulture` on the writer side — only ever accepts
 /// a plain `.`-decimal ASCII format, so no locale handling is needed here
 /// either.
+///
+/// An empty field (two adjacent tabs, or a trailing empty column) is *not*
+/// a parse error — real SimHub captures leave a column blank for a whole
+/// run when the active title doesn't expose that property (e.g. world-space
+/// `CarPosX_raw` on a sim with no such API), and erroring on the very first
+/// blank cell would refuse to load an otherwise-valid file over data the
+/// column never had in the first place. Such a row is simply skipped for
+/// that one channel — its `timecodes`/`values` end up shorter than
+/// `Time_s`'s, same as any other per-channel gap — rather than assumed to
+/// be `0`, which would fabricate a sample that was never recorded.
+///
+/// A row whose column count doesn't match the header, or whose `Time_s`
+/// field doesn't parse (including an empty one — unlike every other
+/// column, a missing timecode leaves nothing to key the row's other
+/// values against), is dropped entirely rather than failing the whole
+/// load. Both are buffered-write glitches seen in real captures around
+/// pause/rewind events — a duplicated/shifted row, or two rows' `Time_s`
+/// values glued together with the tab between them dropped — a handful of
+/// rows out of tens of thousands, that shouldn't cost every other sample
+/// in an otherwise good file. There's no way to tell which of a bad row's
+/// fields are trustworthy, so nothing from it is salvaged.
 fn parse_tsv(text: &str, file_name: &str) -> Result<Vec<ShtepChannel>, ShtepError> {
     let mut lines = text.lines();
     let header_line = lines.next().ok_or_else(|| ShtepError::EmptyFile {
@@ -183,45 +204,51 @@ fn parse_tsv(text: &str, file_name: &str) -> Result<Vec<ShtepChannel>, ShtepErro
         });
     }
 
-    let mut columns: Vec<Vec<f64>> = vec![Vec::new(); headers.len()];
+    // One (timecode, value) pair per non-empty cell; index 0 (`Time_s`)
+    // stays empty and is skipped below, since it becomes every other
+    // channel's own `timecodes` rather than a channel of its own.
+    let mut columns: Vec<Vec<(f64, f64)>> = vec![Vec::new(); headers.len()];
 
     for (row_idx, line) in lines.enumerate() {
         // 1-indexed, plus one for the header row already consumed above.
         let line_no = row_idx + 2;
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() != headers.len() {
-            return Err(ShtepError::MalformedRow {
-                file_name: file_name.to_string(),
-                line: line_no,
-                expected_columns: headers.len(),
-                found_columns: fields.len(),
-            });
+            continue;
         }
-        for (col_idx, field) in fields.iter().enumerate() {
+
+        let Ok(time_s) = fields[0].parse::<f64>() else {
+            continue;
+        };
+        let time_ms = time_s * 1000.0;
+
+        for (col_idx, field) in fields.iter().enumerate().skip(1) {
+            if field.is_empty() {
+                continue;
+            }
             let value: f64 = field.parse().map_err(|_| ShtepError::MalformedNumber {
                 file_name: file_name.to_string(),
                 line: line_no,
                 column: headers[col_idx].to_string(),
                 value: (*field).to_string(),
             })?;
-            columns[col_idx].push(value);
+            columns[col_idx].push((time_ms, value));
         }
     }
-
-    let timecodes: Vec<f64> = columns[0].iter().map(|&t_s| t_s * 1000.0).collect();
 
     let channels = headers
         .into_iter()
         .zip(columns)
         .skip(1) // Time_s itself becomes `timecodes`, not a channel.
-        .map(|(name, values)| {
+        .map(|(name, pairs)| {
             let (unit, interpolate, dec_pts) = channel_meta(name);
+            let (timecodes, values): (Vec<f64>, Vec<f64>) = pairs.into_iter().unzip();
             ShtepChannel {
                 name: name.to_string(),
                 unit,
                 dec_pts,
                 interpolate,
-                timecodes: timecodes.clone(),
+                timecodes,
                 values,
             }
         })
@@ -316,22 +343,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_row_with_the_wrong_column_count() {
-        let tsv = "Time_s\tSpeed_kmh\n0.000\t0.0\n0.010\t1.0\t2.0\n";
-        let err = parse_str(tsv, VALID_SIDECAR, "test.tsv").unwrap_err();
-        match err {
-            ShtepError::MalformedRow {
-                line,
-                expected_columns,
-                found_columns,
-                ..
-            } => {
-                assert_eq!(line, 3);
-                assert_eq!(expected_columns, 2);
-                assert_eq!(found_columns, 3);
-            }
-            other => panic!("expected MalformedRow, got {other:?}"),
-        }
+    fn a_row_with_the_wrong_column_count_is_dropped_not_a_load_failure() {
+        // Real captures have a handful of these around pause/rewind
+        // events (a buffered-write glitch duplicating or shifting one
+        // row's fields) — losing that one sample beats refusing to load
+        // an otherwise many-thousand-row file over it.
+        let tsv = "Time_s\tSpeed_kmh\n0.000\t0.0\n0.010\t1.0\t2.0\n0.020\t3.0\n";
+        let file = parse_str(tsv, VALID_SIDECAR, "test.tsv").unwrap();
+        let speed = file.channel("Speed_kmh").unwrap();
+        assert_eq!(speed.timecodes, vec![0.0, 20.0]);
+        assert_eq!(speed.values, vec![0.0, 3.0]);
     }
 
     #[test]
@@ -339,6 +360,49 @@ mod tests {
         let tsv = "Time_s\tSpeed_kmh\n0.000\tnot-a-number\n";
         let err = parse_str(tsv, VALID_SIDECAR, "test.tsv").unwrap_err();
         assert!(matches!(err, ShtepError::MalformedNumber { .. }));
+    }
+
+    #[test]
+    fn an_empty_field_is_a_skipped_sample_not_a_parse_error() {
+        // Real SimHub captures leave a column blank for the entire run
+        // when the active title doesn't expose that property (e.g.
+        // world-space position on a sim with no such API) — that's not
+        // malformed data, just a channel with fewer samples than others.
+        let tsv = "Time_s\tSpeed_kmh\tCarPosX_raw\n\
+                   0.000\t0.0\t\n\
+                   0.010\t12.5\t\n";
+        let file = parse_str(tsv, VALID_SIDECAR, "test.tsv").unwrap();
+
+        let speed = file.channel("Speed_kmh").unwrap();
+        assert_eq!(speed.timecodes, vec![0.0, 10.0]);
+        assert_eq!(speed.values, vec![0.0, 12.5]);
+
+        let pos = file.channel("CarPosX_raw").unwrap();
+        assert!(pos.timecodes.is_empty());
+        assert!(pos.values.is_empty());
+    }
+
+    #[test]
+    fn a_field_blank_on_only_some_rows_keeps_the_rows_that_have_it() {
+        let tsv = "Time_s\tLapDistance_m\n0.000\t\n0.010\t4.2\n0.020\t8.6\n";
+        let file = parse_str(tsv, VALID_SIDECAR, "test.tsv").unwrap();
+        let dist = file.channel("LapDistance_m").unwrap();
+        assert_eq!(dist.timecodes, vec![10.0, 20.0]);
+        assert_eq!(dist.values, vec![4.2, 8.6]);
+    }
+
+    #[test]
+    fn a_row_with_an_unparseable_time_s_field_is_dropped_not_a_load_failure() {
+        // A row can't be keyed to any timecode without one, but that's the
+        // same "one glitched row shouldn't sink the file" reasoning as the
+        // column-count case above — seen for real as two rows' `Time_s`
+        // values glued together when a buffered write drops the tab
+        // between them.
+        let tsv = "Time_s\tSpeed_kmh\n\t0.0\n0.20.220\t1.0\n0.030\t2.0\n";
+        let file = parse_str(tsv, VALID_SIDECAR, "test.tsv").unwrap();
+        let speed = file.channel("Speed_kmh").unwrap();
+        assert_eq!(speed.timecodes, vec![30.0]);
+        assert_eq!(speed.values, vec![2.0]);
     }
 
     #[test]

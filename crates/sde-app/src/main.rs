@@ -102,6 +102,14 @@ struct AppState {
     setup_compare: Option<sde_setup::Setup>,
     all_channel_names: Vec<String>,
     filter_text: String,
+    /// Whether the channel sidebar list includes channels
+    /// `graph::channel_has_data` considers empty (a format capability the
+    /// exporting sim never populated — e.g. `CarPosX_raw` on a title with
+    /// no world-position telemetry). `false` (the default) hides them, so
+    /// the list isn't dominated by dead columns; the sidebar's checkbox
+    /// flips this back on for anyone who wants to see everything the file
+    /// actually contains.
+    show_empty_channels: bool,
     /// Worksheet docks, in display order. Each dock overlays one or more
     /// channels (see `overlay_pending`/`channel_overlay_toggled` for how
     /// a multi-channel dock gets created) — usually just one.
@@ -401,6 +409,18 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
             state.borrow_mut().filter_text = query.to_string();
+            refresh_channel_list(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_show_empty_channels_toggled(move |show| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            state.borrow_mut().show_empty_channels = show;
             refresh_channel_list(&window, &state);
         });
     }
@@ -1045,10 +1065,31 @@ fn refresh_dock_drag_ui(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
 
 /// Recompute the (filtered) channel list and which of those channels are
 /// currently on the worksheet, and push both into the window. Called
-/// whenever the search text or the dock set changes.
+/// whenever the search text, the empty-channel toggle, or the dock set
+/// changes.
 fn refresh_channel_list(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     let state = state.borrow();
-    let filtered = graph::filter_channel_names(&state.all_channel_names, &state.filter_text);
+    // Empty channels (see `graph::channel_has_data`) are dropped before the
+    // text filter runs, not after — searching for one by name with the
+    // toggle off should find nothing, same as if it weren't in the file.
+    let visible_names: Vec<String> = if state.show_empty_channels {
+        state.all_channel_names.clone()
+    } else {
+        let session = state.session.as_ref();
+        state
+            .all_channel_names
+            .iter()
+            .filter(|name| {
+                session.is_none_or(|s| {
+                    s.channels
+                        .get(*name)
+                        .is_some_and(graph::channel_has_data)
+                })
+            })
+            .cloned()
+            .collect()
+    };
+    let filtered = graph::filter_channel_names(&visible_names, &state.filter_text);
     let active: Vec<bool> = filtered
         .iter()
         .map(|n| state.dock_channels.iter().any(|g| g.contains(n)))
@@ -1137,12 +1178,21 @@ fn refresh_zoom_ui(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
 /// `graph::build_lap_comparison_plot`), but greying out an unavailable
 /// toggle communicates *why* the axis didn't visibly change, rather than
 /// silently doing nothing.
+///
+/// Requires more than just a name match against `key_channel_map.distance`
+/// — a capture whose sim never actually reports distance (see
+/// `graph::channel_has_data`) has that channel present but stuck at a flat
+/// `0.0` for the whole run, which would otherwise enable a Distance mode
+/// that plots nothing.
 fn refresh_axis_ui(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
     let state = state.borrow();
-    let distance_available = state
-        .session
-        .as_ref()
-        .is_some_and(|s| s.key_channel_map.distance.is_some());
+    let distance_available = state.session.as_ref().is_some_and(|s| {
+        s.key_channel_map
+            .distance
+            .as_deref()
+            .and_then(|name| s.channels.get(name))
+            .is_some_and(graph::channel_has_data)
+    });
     window.set_axis_mode_label(
         match state.axis_mode {
             graph::AxisMode::Time => "Time",

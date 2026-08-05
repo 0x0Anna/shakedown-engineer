@@ -1,4 +1,4 @@
-import { Button, VerticalBox, HorizontalBox, LineEdit, ComboBox, ListView, ScrollView } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, LineEdit, ComboBox, ListView, ScrollView, CheckBox } from "std-widgets.slint";
 
 // Milestone 5 shell: a title bar, an "open file" button, a searchable
 // channel list + lap picker/comparison sidebar, and a worksheet of
@@ -228,7 +228,18 @@ component DockPanel {
                     }
                 }
                 scroll-event(event) => {
-                    root.zoom-scrolled(event.delta-x / 1px, event.delta-y / 1px, max(0.0, min(1.0, self.mouse-x / self.width)));
+                    // A plain mouse wheel only ever reports `delta-y`
+                    // (vertical), which `graph::zoom_scroll` reads as
+                    // zoom — there's no way to pan a zoomed-in window
+                    // without a trackpad's native `delta-x`. Holding
+                    // Shift or Alt while scrolling redirects that same
+                    // vertical wheel motion into `delta-x` instead, the
+                    // conventional "modifier turns vertical scroll into
+                    // horizontal" gesture most apps already use.
+                    root.zoom-scrolled(
+                        event.delta-x / 1px + ((event.modifiers.shift || event.modifiers.alt) ? event.delta-y / 1px : 0),
+                        (event.modifiers.shift || event.modifiers.alt) ? 0 : event.delta-y / 1px,
+                        max(0.0, min(1.0, self.mouse-x / self.width)));
                     accept
                 }
             }
@@ -282,6 +293,10 @@ export component AppWindow inherits Window {
     in property <[bool]> channel-overlay-pending: []; // aligned with channel-names: queued (Ctrl+click) for a new overlay dock
     in property <[string]> overlay-pending-names: []; // the queue itself, for display
     in property <string> channel-filter-text: "";
+    // Whether `channel-names` includes channels with no real data (see
+    // `graph::channel_has_data`) — off by default so the list isn't
+    // dominated by columns the loaded file's sim never populated.
+    in-out property <bool> show-empty-channels: false;
     in property <[string]> lap-labels: []; // "All", "Lap 1 (...)", ...
     in property <int> current-lap-index: 0;
     in property <[string]> compare-lap-labels: []; // "1", "2", ... one per lap
@@ -319,6 +334,7 @@ export component AppWindow inherits Window {
     callback open-replay-info();
     callback cursor-moved(float); // fraction 0..1 across the graph width
     callback channel-filter-changed(string);
+    callback show-empty-channels-toggled(bool);
     callback dock-selected(string); // toggles a channel in/out of the worksheet as its own dock
     callback dock-removed(int); // index into `docks`
     callback dock-drag-started(int); // index into `docks`: begin dragging that dock's header
@@ -636,6 +652,14 @@ export component AppWindow inherits Window {
                     font-size: 10px;
                     color: gray;
                     wrap: word-wrap;
+                }
+                CheckBox {
+                    text: "Show empty channels";
+                    checked: root.show-empty-channels;
+                    toggled => {
+                        root.show-empty-channels = self.checked;
+                        root.show-empty-channels-toggled(self.checked);
+                    }
                 }
 
                 ListView {
