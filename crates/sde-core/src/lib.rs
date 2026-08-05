@@ -18,6 +18,7 @@ use std::path::Path;
 
 pub mod mathexpr;
 
+pub use sde_acr::AcrError;
 pub use sde_ibt::IbtError;
 pub use sde_motec::{LdError, TimePenalty};
 pub use sde_shtep::ShtepError;
@@ -69,6 +70,19 @@ impl From<sde_ibt::IbtChannel> for Channel {
 
 impl From<sde_shtep::ShtepChannel> for Channel {
     fn from(c: sde_shtep::ShtepChannel) -> Self {
+        Self {
+            name: c.name,
+            units: c.unit,
+            dec_pts: c.dec_pts,
+            interpolate: c.interpolate,
+            timecodes: c.timecodes,
+            values: c.values,
+        }
+    }
+}
+
+impl From<sde_acr::AcrChannel> for Channel {
+    fn from(c: sde_acr::AcrChannel) -> Self {
         Self {
             name: c.name,
             units: c.unit,
@@ -283,6 +297,73 @@ impl Session {
             metadata,
             key_channel_map,
             file_name: shtep_file.file_name,
+            time_penalties: Vec::new(),
+        }
+    }
+
+    /// Load a session from an `acr_telemetry` `acr_export --csv` file on
+    /// disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns any [`AcrError`] that `sde_acr::parse` returns — i.e. if
+    /// the file can't be read, or isn't a well-formed `acr_export` CSV.
+    pub fn load_acr(path: &Path) -> Result<Self, AcrError> {
+        let acr_file = sde_acr::parse(path)?;
+        Ok(Self::from_acr_file(acr_file))
+    }
+
+    /// Build a `Session` from an already-parsed `sde_acr::AcrFile`.
+    #[must_use]
+    pub fn from_acr_file(acr_file: sde_acr::AcrFile) -> Self {
+        let channels: HashMap<String, Channel> = acr_file
+            .channels
+            .into_iter()
+            .map(|c| (c.name.clone(), Channel::from(c)))
+            .collect();
+
+        // The CSV has no GPS lat/long (ACC/AC Rally physics exposes only
+        // world/local-space position, e.g. `car_pos_x/y/z`, which
+        // `KeyChannelMap` has no slot for yet — same gap `sde-shtep` has),
+        // and no distance channel among the currently supported fields
+        // (see `docs/FIELDS.md`) — `distance` stays `None` rather than
+        // guessing at a scalar that isn't actually exported.
+        let key_channel_map = KeyChannelMap {
+            speed: has(&channels, "speed_kmh"),
+            lat: None,
+            long: None,
+            alt: None,
+            distance: find_distance_channel(&channels),
+        };
+
+        let end_time = channels
+            .values()
+            .filter_map(|c| c.timecodes.last().copied())
+            .fold(0.0_f64, f64::max);
+
+        // `acr_recorder` records one continuous physics stream for a
+        // single ACC/AC Rally session — like a rally stage, there's no
+        // in-file lap-boundary channel to split on (same reasoning
+        // `Session::from_shtep_file` applies to its own `"stage"` case),
+        // so the whole recording is treated as one lap.
+        let laps = boundaries_to_laps(&[0.0, end_time]);
+
+        let mut metadata = HashMap::new();
+        metadata.insert("Venue".to_string(), acr_file.venue);
+        metadata.insert("Vehicle".to_string(), acr_file.vehicle);
+        metadata.insert("Driver".to_string(), acr_file.driver);
+        metadata.insert("Log Date".to_string(), acr_file.log_date);
+        metadata.insert("Log Time".to_string(), acr_file.log_time);
+        if let Some(hz) = acr_file.sample_rate_hz {
+            metadata.insert("Sample Rate".to_string(), format!("{hz:.0} Hz"));
+        }
+
+        Self {
+            channels,
+            laps,
+            metadata,
+            key_channel_map,
+            file_name: acr_file.file_name,
             time_penalties: Vec::new(),
         }
     }

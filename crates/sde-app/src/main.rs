@@ -1,4 +1,5 @@
-//! Slint GUI shell: load a MoTeC `.ld`, iRacing `.ibt`, or `shtep` `.tsv` file, search/pick channels to add
+//! Slint GUI shell: load a MoTeC `.ld`, iRacing `.ibt`, `shtep` `.tsv`, or
+//! `acr_telemetry` `.csv` file, search/pick channels to add
 //! to a worksheet of stacked line-graph docks, optionally restrict the
 //! view to a single lap (or overlay several laps for comparison), and
 //! drag a shared vertical time cursor over the docks. See
@@ -246,11 +247,12 @@ fn main() -> Result<(), slint::PlatformError> {
             };
 
             let mut dialog = rfd::FileDialog::new()
-                .add_filter("Telemetry log", &["ld", "ibt", "tsv"])
+                .add_filter("Telemetry log", &["ld", "ibt", "tsv", "csv"])
                 .add_filter("MoTeC log", &["ld"])
                 .add_filter("iRacing telemetry", &["ibt"])
                 .add_filter("shtep TSV export", &["tsv"])
-                .set_title("Open a .ld, .ibt, or .tsv telemetry log");
+                .add_filter("acr_telemetry CSV export", &["csv"])
+                .set_title("Open a .ld, .ibt, .tsv, or .csv telemetry log");
             if let Some(dir) = state
                 .borrow()
                 .install_paths
@@ -1355,6 +1357,7 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
     let load_result = match ext.as_deref() {
         Some("ibt") => sde_core::Session::load_ibt(path).map_err(|e| e.to_string()),
         Some("tsv") => sde_core::Session::load_shtep(path).map_err(|e| e.to_string()),
+        Some("csv") => sde_core::Session::load_acr(path).map_err(|e| e.to_string()),
         _ => sde_core::Session::load_motec(path).map_err(|e| e.to_string()),
     };
 
