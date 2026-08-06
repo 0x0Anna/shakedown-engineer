@@ -647,6 +647,24 @@ pub fn value_at_raw(timecodes: &[f64], values: &[f64], interpolate: bool, t: f64
     }
 }
 
+/// Whether `channel` carries any real signal, as opposed to a column a
+/// format/sim simply never populates. A capability the exporting sim
+/// doesn't support (e.g. SimHub's `CarPosX_raw` when the active title
+/// doesn't expose world-space car position) still shows up as a full-width
+/// column, just one that's either entirely empty (see the `shtep` TSV
+/// parser's empty-field handling) or filled with the same `0.0` sentinel
+/// on every row — indistinguishable, from a UI's point of view, from
+/// "no data" and not worth a dock or a distance-axis mode built on it.
+///
+/// Deliberately checks for *all-zero*, not merely *flat* — a channel that
+/// legitimately sits at one nonzero value for a whole run (e.g. `AirTemp_C`
+/// on a session with no weather change) is real data and shouldn't be
+/// suppressed just because it isn't varying right now.
+#[must_use]
+pub fn channel_has_data(channel: &Channel) -> bool {
+    !channel.values.is_empty() && channel.values.iter().any(|&v| v != 0.0)
+}
+
 /// Pick which channel to plot by default when a file is first loaded (the
 /// user can then pick a different one via the channel search/list): the
 /// first `interpolate == true` channel in alphabetical order by name, or
@@ -1900,5 +1918,44 @@ mod tests {
         let t_last = *channel.timecodes.last().unwrap();
         let v_last = *channel.values.last().unwrap();
         assert_eq!(value_at(channel, t_last + 1_000_000.0), Some(v_last));
+    }
+
+    #[test]
+    fn channel_has_data_is_false_for_empty_or_all_zero_channels() {
+        let empty = Channel {
+            name: "Empty".into(),
+            units: String::new(),
+            dec_pts: 0,
+            interpolate: true,
+            timecodes: vec![],
+            values: vec![],
+        };
+        assert!(!channel_has_data(&empty));
+
+        let all_zero = Channel {
+            name: "CarPosX_raw".into(),
+            units: String::new(),
+            dec_pts: 2,
+            interpolate: true,
+            timecodes: vec![0.0, 10.0, 20.0],
+            values: vec![0.0, 0.0, 0.0],
+        };
+        assert!(!channel_has_data(&all_zero));
+    }
+
+    #[test]
+    fn channel_has_data_is_true_for_a_nonzero_flat_or_varying_channel() {
+        let flat_nonzero = Channel {
+            name: "AirTemp_C".into(),
+            units: "\u{b0}C".into(),
+            dec_pts: 1,
+            interpolate: true,
+            timecodes: vec![0.0, 10.0],
+            values: vec![12.51, 12.51],
+        };
+        assert!(channel_has_data(&flat_nonzero));
+
+        let varying = channel(true);
+        assert!(channel_has_data(&varying));
     }
 }

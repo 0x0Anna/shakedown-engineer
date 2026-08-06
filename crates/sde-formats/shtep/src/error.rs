@@ -37,16 +37,6 @@ pub enum ShtepError {
     #[error("{file_name:?}'s header row must start with \"Time_s\" (found {found:?})")]
     MissingTimeColumn { file_name: String, found: String },
 
-    #[error(
-        "{file_name:?} line {line}: expected {expected_columns} columns (per the header), found {found_columns}"
-    )]
-    MalformedRow {
-        file_name: String,
-        line: usize,
-        expected_columns: usize,
-        found_columns: usize,
-    },
-
     #[error("{file_name:?} line {line}, column {column:?}: {value:?} is not a valid number")]
     MalformedNumber {
         file_name: String,
