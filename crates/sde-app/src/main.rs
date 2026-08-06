@@ -1080,11 +1080,7 @@ fn refresh_channel_list(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
             .all_channel_names
             .iter()
             .filter(|name| {
-                session.is_none_or(|s| {
-                    s.channels
-                        .get(*name)
-                        .is_some_and(graph::channel_has_data)
-                })
+                session.is_none_or(|s| s.channels.get(*name).is_some_and(graph::channel_has_data))
             })
             .cloned()
             .collect()
