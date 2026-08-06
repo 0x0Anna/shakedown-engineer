@@ -93,6 +93,82 @@ fn windowed_samples(channel: &Channel, start: f64, end: f64) -> Vec<(f64, f64)> 
     samples
 }
 
+/// Cap on plotted points per pixel column: two lets a bucket's min and max
+/// both survive (see [`decimate_for_display`]), which a single "one point
+/// per column" reduction wouldn't — a brief brake spike or curb hit inside
+/// a bucket would otherwise vanish into whichever sample happened to land
+/// closest to the column's timestamp.
+const MAX_POINTS_PER_PIXEL: usize = 2;
+
+/// Reduce `samples` to roughly `MAX_POINTS_PER_PIXEL * view_width` points
+/// by min/max decimation, when there are enough samples for it to matter.
+///
+/// A high-rate capture (ACR's `acr_telemetry` export runs ~333 Hz) zoomed
+/// out to a multi-minute stage can carry tens of thousands of samples
+/// while the SVG `Path` it's plotted into is `view_width` pixels wide
+/// (1000, see `VIEW_WIDTH`) — every one of those samples becoming its own
+/// `L x y ` command was both wasted `write!` work building the string and
+/// wasted work for Slint tessellating/rendering a path with ~100x more
+/// vertices than pixels. Bucketing by time (not by index) and keeping
+/// each bucket's min and max preserves visual spikes a naive stride
+/// (every Nth sample) would alias away.
+///
+/// A no-op below the threshold, so normal zoomed-in windows (already
+/// close to one sample per pixel or fewer) pay nothing extra. Always
+/// keeps `samples`' exact first/last point, since [`windowed_samples`]'s
+/// synthesized boundary points (or the window's own real edge samples)
+/// are what let the plotted line touch both edges of the window — a
+/// bucket's min/max pick could otherwise silently drop them.
+fn decimate_for_display(samples: Vec<(f64, f64)>, view_width: f64) -> Vec<(f64, f64)> {
+    let buckets = view_width.max(1.0) as usize;
+    let max_points = buckets * MAX_POINTS_PER_PIXEL;
+    if samples.len() <= max_points {
+        return samples;
+    }
+
+    let t0 = samples[0].0;
+    let t1 = samples[samples.len() - 1].0;
+    let bucket_width = ((t1 - t0) / buckets as f64).max(f64::EPSILON);
+
+    let mut out = Vec::with_capacity(max_points + 2);
+    let mut i = 0;
+    while i < samples.len() {
+        let bucket_end = t0 + (((samples[i].0 - t0) / bucket_width).floor() + 1.0) * bucket_width;
+        let mut min_s = samples[i];
+        let mut max_s = samples[i];
+        let mut j = i;
+        while j < samples.len() && samples[j].0 < bucket_end {
+            if samples[j].1 < min_s.1 {
+                min_s = samples[j];
+            }
+            if samples[j].1 > max_s.1 {
+                max_s = samples[j];
+            }
+            j += 1;
+        }
+        // Keep time-ascending order within the bucket regardless of which
+        // extreme (min or max) occurred first.
+        if min_s.0 <= max_s.0 {
+            out.push(min_s);
+            out.push(max_s);
+        } else {
+            out.push(max_s);
+            out.push(min_s);
+        }
+        i = j;
+    }
+
+    let first = samples[0];
+    let last = samples[samples.len() - 1];
+    if out.first() != Some(&first) {
+        out.insert(0, first);
+    }
+    if out.last() != Some(&last) {
+        out.push(last);
+    }
+    out
+}
+
 /// Build an SVG path (`M x y L x y L x y ...`) plotting `channel.values`
 /// against `channel.timecodes`, normalized into a `view_width` x
 /// `view_height` box. Y is flipped (SVG/Slint y grows downward, but a
@@ -130,6 +206,7 @@ pub fn build_plot(
     if samples.is_empty() {
         return None;
     }
+    let samples = decimate_for_display(samples, view_width);
 
     let time_span = (max_time - min_time).max(f64::EPSILON);
     let raw_min = samples
@@ -538,7 +615,7 @@ pub fn build_lap_comparison_plot(
     let per_range_samples: Vec<Vec<(f64, f64)>> = ranges
         .iter()
         .map(|&(start, end)| {
-            let raw = windowed_samples(channel, start, end);
+            let raw = decimate_for_display(windowed_samples(channel, start, end), view_width);
             match distance_channel {
                 Some(dist_ch) => {
                     let start_dist = value_at(dist_ch, start).unwrap_or(0.0);
@@ -1031,6 +1108,66 @@ mod tests {
         // off the dock's border).
         assert!(plot.commands.starts_with("M 0 "));
         assert!(!plot.commands.starts_with("M 0 100 "));
+    }
+
+    #[test]
+    fn decimate_for_display_is_a_no_op_below_the_point_budget() {
+        let samples: Vec<(f64, f64)> = (0..500).map(|i| (f64::from(i), f64::from(i))).collect();
+        let view_width = 1000.0; // budget 2000 points, well above 500
+        assert_eq!(decimate_for_display(samples.clone(), view_width), samples);
+    }
+
+    #[test]
+    fn decimate_for_display_caps_point_count_for_a_dense_channel() {
+        // 100k samples over a 1000px-wide view (budget 2000 points) is the
+        // exact shape of a full-zoom view of a high-rate ACR capture.
+        let samples: Vec<(f64, f64)> = (0..100_000)
+            .map(|i| (f64::from(i), (f64::from(i) * 0.01).sin()))
+            .collect();
+        let out = decimate_for_display(samples, 1000.0);
+        assert!(
+            out.len() <= 2002,
+            "expected roughly 2000 points, got {}",
+            out.len()
+        );
+        assert!(out.len() > 100, "shouldn't collapse to almost nothing");
+    }
+
+    #[test]
+    fn decimate_for_display_preserves_a_spike_inside_one_bucket() {
+        // A single-sample spike buried in an otherwise flat run must
+        // survive decimation — min/max-per-bucket exists precisely so a
+        // brake-pressure or curb-strike transient isn't averaged away.
+        let mut samples: Vec<(f64, f64)> = (0..10_000).map(|i| (f64::from(i), 0.0)).collect();
+        samples[4_242].1 = 999.0;
+        let out = decimate_for_display(samples, 1000.0);
+        assert!(
+            out.iter().any(|&(_, v)| v == 999.0),
+            "spike value was lost during decimation"
+        );
+    }
+
+    #[test]
+    fn decimate_for_display_keeps_exact_first_and_last_points() {
+        let mut samples: Vec<(f64, f64)> = (0..50_000).map(|i| (f64::from(i), 0.0)).collect();
+        samples[0] = (0.0, 1.5);
+        let last = samples.len() - 1;
+        samples[last] = (49_999.0, -2.5);
+        let out = decimate_for_display(samples.clone(), 1000.0);
+        assert_eq!(out.first(), Some(&samples[0]));
+        assert_eq!(out.last(), Some(&samples[last]));
+    }
+
+    #[test]
+    fn decimate_for_display_keeps_time_ascending_order() {
+        let samples: Vec<(f64, f64)> = (0..50_000)
+            .map(|i| (f64::from(i), (f64::from(i) * 0.037).cos()))
+            .collect();
+        let out = decimate_for_display(samples, 1000.0);
+        assert!(
+            out.windows(2).all(|w| w[0].0 <= w[1].0),
+            "decimated output must stay time-ascending for value_at-style bracket search"
+        );
     }
 
     #[test]
