@@ -2,7 +2,7 @@
 //! `Session` data-model boundary works, ahead of any GUI (milestone 2's
 //! goal per PROJECT_PLAN.md).
 //!
-//! Usage: `dump_channels <path-to-file.ld|.ibt|.tsv>`
+//! Usage: `dump_channels <path-to-file.ld|.ibt|.tsv|.csv>`
 
 // `doc_markdown`: fires on the plain-English `PROJECT_PLAN.md` mention
 // above; not worth backtick-wrapping for a doc-only lint.
@@ -21,7 +21,7 @@ fn main() -> ExitCode {
     let path = match args.next() {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("usage: dump_channels <path-to-file.ld|.ibt|.tsv>");
+            eprintln!("usage: dump_channels <path-to-file.ld|.ibt|.tsv|.csv>");
             return ExitCode::FAILURE;
         }
     };
@@ -33,6 +33,7 @@ fn main() -> ExitCode {
     let session = match ext.as_deref() {
         Some("ibt") => sde_core::Session::load_ibt(&path).map_err(|e| e.to_string()),
         Some("tsv") => sde_core::Session::load_shtep(&path).map_err(|e| e.to_string()),
+        Some("csv") => sde_core::Session::load_acr(&path).map_err(|e| e.to_string()),
         _ => sde_core::Session::load_motec(&path).map_err(|e| e.to_string()),
     };
     let session = match session {

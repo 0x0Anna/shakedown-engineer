@@ -4245,6 +4245,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sde-acr"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "sde-app"
 version = "0.1.0"
 dependencies = [
@@ -4268,6 +4275,7 @@ dependencies = [
 name = "sde-core"
 version = "0.1.0"
 dependencies = [
+ "sde-acr",
  "sde-ibt",
  "sde-motec",
  "sde-shtep",
