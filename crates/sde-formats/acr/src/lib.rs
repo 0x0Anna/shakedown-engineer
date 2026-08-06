@@ -192,8 +192,7 @@ pub fn parse_str(text: &str, file_name: impl Into<String>) -> Result<AcrFile, Ac
         .map(|(i, name)| {
             let unit = units.get(i).cloned().unwrap_or_default();
             let interpolate = is_continuous(name);
-            let (timecodes, values): (Vec<f64>, Vec<f64>) =
-                columns[i].iter().copied().unzip();
+            let (timecodes, values): (Vec<f64>, Vec<f64>) = columns[i].iter().copied().unzip();
             AcrChannel {
                 name: name.clone(),
                 unit,
