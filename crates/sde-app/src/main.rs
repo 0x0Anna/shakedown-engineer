@@ -6,6 +6,7 @@
 //! PROJECT_PLAN.md for scope; see `graph.rs` for the pure plotting/lookup
 //! logic this file wires up to the UI.
 
+#![windows_subsystem = "windows"]
 // clippy::pedantic/nursery notes (not part of the default lint set the
 // project otherwise keeps clean):
 // - doc_markdown fires repeatedly on plain-English mentions of
