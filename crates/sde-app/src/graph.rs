@@ -155,7 +155,18 @@ fn decimate_for_display(samples: Vec<(f64, f64)>, view_width: f64) -> Vec<(f64, 
             out.push(max_s);
             out.push(min_s);
         }
-        i = j;
+        // `bucket_end` is meant to always land strictly after
+        // `samples[i].0` (guaranteeing the inner loop above consumes at
+        // least `samples[i]` itself), but reconstructing it via
+        // `floor(...) + 1.0) * bucket_width` can round down far enough
+        // that `bucket_end <= samples[i].0` for a large enough bucket
+        // index — the inner loop then consumes zero samples, leaving
+        // `j == i`. Without this, `i = j` wouldn't advance and the outer
+        // loop would never terminate, growing `out` without bound (a real
+        // freeze/OOM this shipped with). Forcing at least one sample of
+        // progress keeps this loop provably bounded by `samples.len()`
+        // regardless of any floating-point edge case in `bucket_end`.
+        i = j.max(i + 1);
     }
 
     let first = samples[0];
@@ -1174,6 +1185,37 @@ mod tests {
         let out = decimate_for_display(samples.clone(), 1000.0);
         assert_eq!(out.first(), Some(&samples[0]));
         assert_eq!(out.last(), Some(&samples[last]));
+    }
+
+    #[test]
+    fn decimate_for_display_terminates_when_bucket_end_rounds_below_the_sample() {
+        // Regression test for a real freeze/OOM: `bucket_end` is
+        // reconstructed as `t0 + (floor((t - t0) / bucket_width) + 1.0) *
+        // bucket_width`, which is *meant* to always land strictly after
+        // `t`, but at a large enough time offset the floating-point
+        // reconstruction can round down far enough that `bucket_end <= t`
+        // for some sample. Before the `i = j.max(i + 1)` fix, that left
+        // the inner loop consuming zero samples (`j == i`), so `i` never
+        // advanced and the outer loop ran forever, growing `out` without
+        // bound. A huge time offset plus non-uniform spacing (real
+        // telemetry timecodes late in a long session, not a clean
+        // multiple of the sample interval) is exactly the kind of input
+        // that can trigger the rounding.
+        let base = 1e11;
+        let samples: Vec<(f64, f64)> = (0..50_000)
+            .map(|i| (base + f64::from(i) * 3.000_000_1, 0.0))
+            .collect();
+        let max_points = 1000 * MAX_POINTS_PER_PIXEL;
+
+        // Terminating at all (not hanging forever) is the actual
+        // regression coverage here; the bound below confirms the fix
+        // didn't just terminate by accident with a blown-up output.
+        let out = decimate_for_display(samples, 1000.0);
+        assert!(
+            out.len() <= max_points + 2,
+            "decimated output should stay bounded, got {} points",
+            out.len()
+        );
     }
 
     #[test]
