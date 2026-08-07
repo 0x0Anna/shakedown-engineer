@@ -95,6 +95,16 @@ component DockPanel {
 
     VerticalLayout {
         padding: 0px;
+        // Reserves room on the right, on every row (header, legend, and
+        // the graph itself), for the "Stacked" layout mode's `ListView`
+        // scrollbar (see below), which overlays the viewport's right edge
+        // rather than reserving its own space — without this, content
+        // flush against the panel's right edge (the cursor-value text,
+        // and the plotted trace/close-button overlay) gets clipped/
+        // hidden behind the scrollbar thumb whenever the worksheet has
+        // enough docks to scroll. Harmless in Side-by-side/Grid mode,
+        // which has no scrollbar here.
+        padding-right: 16px;
         spacing: 2px;
 
         HorizontalBox {
@@ -152,20 +162,14 @@ component DockPanel {
                 // Kept out of `DockData` so dragging the cursor only has
                 // to update this one small string, not rebuild every
                 // dock's path commands. Fixed width (rather than sizing
-                // to content) so the row doesn't reflow — and the "x"
-                // button doesn't visibly shift — every time the value's
-                // digit count changes as the cursor moves.
+                // to content) so the row doesn't reflow every time the
+                // value's digit count changes as the cursor moves.
                 text: root.cursor-visible ? root.cursor-value : "";
                 font-size: 13px;
                 color: gray;
                 min-width: 160px;
                 horizontal-alignment: right;
                 overflow: elide;
-            }
-            Button {
-                text: "x";
-                width: 22px;
-                clicked => { root.removed(); }
             }
         }
 
@@ -228,19 +232,43 @@ component DockPanel {
                     }
                 }
                 scroll-event(event) => {
-                    // A plain mouse wheel only ever reports `delta-y`
-                    // (vertical), which `graph::zoom_scroll` reads as
-                    // zoom — there's no way to pan a zoomed-in window
-                    // without a trackpad's native `delta-x`. Holding
-                    // Shift or Alt while scrolling redirects that same
-                    // vertical wheel motion into `delta-x` instead, the
-                    // conventional "modifier turns vertical scroll into
-                    // horizontal" gesture most apps already use.
-                    root.zoom-scrolled(
-                        event.delta-x / 1px + ((event.modifiers.shift || event.modifiers.alt) ? event.delta-y / 1px : 0),
-                        (event.modifiers.shift || event.modifiers.alt) ? 0 : event.delta-y / 1px,
-                        max(0.0, min(1.0, self.mouse-x / self.width)));
-                    accept
+                    // Plain, unmodified scroll is rejected rather than
+                    // accepted, so it falls through to the "Stacked"
+                    // layout's `ListView` and scrolls the worksheet like
+                    // any normal page — without this, whichever dock
+                    // happened to be under the cursor mid-scroll would
+                    // zoom instead of the list moving, since every dock's
+                    // graph otherwise unconditionally accepted every
+                    // scroll event that crossed it. Ctrl+scroll is the
+                    // deliberate "I mean to zoom this chart" signal,
+                    // matching the same modifier-gated pattern other
+                    // tools (Figma, Google Maps, ...) use for scroll-to-
+                    // zoom over scrollable content.
+                    //
+                    // Shift/Alt alone (no Ctrl) still pan, unchanged from
+                    // before this gating was added: holding one of them
+                    // is already a deliberate gesture on its own — it's
+                    // only *plain* scroll that's ambiguous with "just
+                    // scrolling the page" — so requiring Ctrl on top of
+                    // Shift/Alt too would only relearn a shortcut that
+                    // was never actually accident-prone.
+                    if (!event.modifiers.control && !event.modifiers.shift && !event.modifiers.alt) {
+                        reject
+                    } else {
+                        // A plain mouse wheel only ever reports `delta-y`
+                        // (vertical), which `graph::zoom_scroll` reads as
+                        // zoom — there's no way to pan a zoomed-in window
+                        // without a trackpad's native `delta-x`. Holding
+                        // Shift or Alt redirects that same vertical wheel
+                        // motion into `delta-x` instead, the conventional
+                        // "modifier turns vertical scroll into
+                        // horizontal" gesture most apps already use.
+                        root.zoom-scrolled(
+                            event.delta-x / 1px + ((event.modifiers.shift || event.modifiers.alt) ? event.delta-y / 1px : 0),
+                            (event.modifiers.shift || event.modifiers.alt) ? 0 : event.delta-y / 1px,
+                            max(0.0, min(1.0, self.mouse-x / self.width)));
+                        accept
+                    }
                 }
             }
 
@@ -271,6 +299,38 @@ component DockPanel {
                 width: 2px;
                 height: 100%;
                 background: #ff5a5a;
+            }
+
+            // Close button, as a translucent overlay on the graph itself
+            // rather than a full row in the header — reclaims the
+            // vertical space a dedicated header button/row cost, and
+            // (being positioned relative to this Rectangle rather than
+            // flush with the panel's outer edge) automatically stays
+            // clear of the "Stacked" layout's scrollbar via this
+            // component's own right-padding inset. Mostly-transparent at
+            // rest so it doesn't obscure the trace beneath it; solid on
+            // hover, both so it's easy to find and to confirm the click
+            // will land on it and not the graph (which would move the
+            // cursor instead).
+            close-button := Rectangle {
+                x: parent.width - self.width - 6px;
+                y: 6px;
+                width: 22px;
+                height: 22px;
+                border-radius: 4px;
+                background: close-area.has-hover ? #3a3f4b : #ffffff18;
+                Text {
+                    text: "x";
+                    font-size: 13px;
+                    color: close-area.has-hover ? white : #ffffffa0;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
+                }
+                close-area := TouchArea {
+                    clicked => { root.removed(); }
+                }
             }
         }
     }
@@ -493,6 +553,13 @@ export component AppWindow inherits Window {
         HorizontalBox {
             padding: 0px;
             spacing: 8px;
+            // Fixed so this row's height can't change when the zoom pill
+            // (below) appears/disappears — it used to be a plain
+            // `Button`, whose taller default height grew the whole row
+            // and recentered "Layout:"/"Axis:" a few pixels every time
+            // the pill toggled. 24px matches every hand-rolled chip in
+            // this row.
+            height: 24px;
 
             Text {
                 text: "Layout:";
@@ -594,11 +661,26 @@ export component AppWindow inherits Window {
 
             Rectangle { horizontal-stretch: 1; }
 
-            // Non-linear-video-editor-style timeline zoom: scroll (wheel
-            // or trackpad) over any dock zooms in/out around the pointer;
-            // shift-scroll/horizontal-swipe pans. This just shows the
-            // current window and offers a way back to fully zoomed out,
-            // since there's no on-canvas ruler/scrubber (yet).
+            // Non-linear-video-editor-style timeline zoom: Ctrl+scroll
+            // (wheel or trackpad) over any dock zooms in/out around the
+            // pointer; Ctrl+shift-scroll/horizontal-swipe pans. Plain
+            // scroll (no Ctrl) is deliberately *not* wired to zoom — see
+            // the graph `TouchArea`'s `scroll-event` handler — so it just
+            // scrolls the worksheet like any normal list; Ctrl is the
+            // discoverable, deliberate "zoom this chart" signal instead
+            // of every dock's graph hijacking scroll from the list.
+            //
+            // Reuses this same slot for a one-line reminder of that
+            // gesture when not zoomed, rather than adding a separate
+            // hint row — once zoomed, this shows the current window and
+            // a way back to fully zoomed out instead, since there's no
+            // on-canvas ruler/scrubber (yet).
+            if root.zoom-range-text == "": Text {
+                text: "Ctrl+scroll a chart to zoom";
+                vertical-alignment: center;
+                font-size: 12px;
+                color: #5a5f6b;
+            }
             if root.zoom-range-text != "": HorizontalLayout {
                 spacing: 8px;
                 Text {
@@ -607,9 +689,26 @@ export component AppWindow inherits Window {
                     font-size: 12px;
                     color: gray;
                 }
-                Button {
-                    text: "Reset zoom";
-                    clicked => { root.zoom-reset(); }
+                // Hand-rolled to match this row's 24px chip height
+                // (rather than `Button`, whose own preferred height grew
+                // the whole row whenever this pill appeared/disappeared
+                // — see the row's `height: 24px` comment above).
+                Rectangle {
+                    width: 90px;
+                    height: 24px;
+                    background: #2a2f3a;
+                    border-radius: 3px;
+                    TouchArea {
+                        clicked => { root.zoom-reset(); }
+                    }
+                    Text {
+                        text: "Reset zoom";
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
                 }
             }
         }

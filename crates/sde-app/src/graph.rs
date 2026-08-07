@@ -787,15 +787,29 @@ pub fn pick_default_channel(session: &sde_core::Session) -> Option<&Channel> {
 /// way through to [`pick_default_channel`]'s single-channel fallback,
 /// which is the "only shows one panel" bug this list closes for that
 /// format.
+///
+/// The `speed_kmh`/`rpm`/`gas`/`steer_angle` names are `acr_telemetry`'s
+/// *own* raw physics field names (see `docs/FIELDS.md`, and
+/// `sde-formats/acr`'s `AcrChannel` doc comment) — distinct from the
+/// `Speed_kmh`/`steering`-style names an earlier, more limited
+/// `motec_profiles/*.toml` export used (see
+/// `acr-telemetry-capture-scoping` memory). A `.ld` from
+/// `acr_telemetry`'s newer, richer profile carries these lowercase
+/// snake_case names directly, which matched none of the existing
+/// candidates and fell through to a near-empty default worksheet
+/// (`brake`/`gear` were the only names that happened to already be in
+/// this list). No dedicated `Throttle`-named channel exists in ACR's
+/// field set at all — `gas` (0..1 accelerator input) is the equivalent.
 const DEFAULT_DOCK_ROLES: &[&[&str]] = &[
-    &["Ground Speed", "Speed", "Speed_kmh", "speed"],
-    &["RPM", "Engine0_RPM", "engineRotation"],
+    &["Ground Speed", "Speed", "Speed_kmh", "speed", "speed_kmh"],
+    &["RPM", "Engine0_RPM", "engineRotation", "rpm"],
     &[
         "Throttle",
         "THROTTLE",
         "Throttle_pct",
         "ThrottleRaw",
         "throttle",
+        "gas",
     ],
     &["Brake", "BRAKE", "Brake_pct", "BrakeRaw", "brake"],
     &["Gear", "GEAR", "gear"],
@@ -804,6 +818,7 @@ const DEFAULT_DOCK_ROLES: &[&[&str]] = &[
         "STEERANGLE",
         "SteerAngle_deg",
         "steering",
+        "steer_angle",
     ],
 ];
 
@@ -1850,6 +1865,37 @@ mod tests {
                 vec!["brake".to_string()],
                 vec!["gear".to_string()],
                 vec!["steering".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn default_dock_channels_picks_one_match_per_role_acr_richer_profile_names() {
+        // A newer/richer `acr_telemetry` `.ld` export (see the
+        // DEFAULT_DOCK_ROLES doc comment) uses its own raw physics field
+        // names, distinct from the earlier limited profile's
+        // MoTeC-style names — this used to match only `brake`/`gear`
+        // (already covered by the RSF/NGP names above) and leave the
+        // default worksheet missing speed/RPM/throttle/steering.
+        let session = session_with(vec![
+            stub_channel("speed_kmh"),
+            stub_channel("rpm"),
+            stub_channel("gas"),
+            stub_channel("brake"),
+            stub_channel("gear"),
+            stub_channel("steer_angle"),
+            stub_channel("fz_fl"),
+        ]);
+        let docks = default_dock_channels(&session);
+        assert_eq!(
+            docks,
+            vec![
+                vec!["speed_kmh".to_string()],
+                vec!["rpm".to_string()],
+                vec!["gas".to_string()],
+                vec!["brake".to_string()],
+                vec!["gear".to_string()],
+                vec!["steer_angle".to_string()],
             ]
         );
     }
