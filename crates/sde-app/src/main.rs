@@ -251,31 +251,41 @@ fn main() -> Result<(), slint::PlatformError> {
         let window_weak = window.as_weak();
         let state = state.clone();
         window.on_open_file(move || {
-            let Some(window) = window_weak.upgrade() else {
-                return;
-            };
+            // Deferred to the next event-loop tick (see the comment on
+            // `on_set_install_root` below for why): showing a blocking
+            // native dialog synchronously from inside this `clicked`
+            // handler let Windows redeliver the click's mouse-up to the
+            // button underneath once the dialog closed, firing `open-file`
+            // a second time and popping the dialog right back open.
+            let window_weak = window_weak.clone();
+            let state = state.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(window) = window_weak.upgrade() else {
+                    return;
+                };
 
-            let mut dialog = rfd::FileDialog::new()
-                .add_filter("Telemetry log", &["ld", "ibt", "tsv", "csv"])
-                .add_filter("MoTeC log", &["ld"])
-                .add_filter("iRacing telemetry", &["ibt"])
-                .add_filter("shtep TSV export", &["tsv"])
-                .add_filter("acr_telemetry CSV export", &["csv"])
-                .set_title("Open a .ld, .ibt, .tsv, or .csv telemetry log");
-            if let Some(dir) = state
-                .borrow()
-                .install_paths
-                .as_ref()
-                .map(|p| p.ngp_telemetry_dir.clone())
-            {
-                dialog = dialog.set_directory(dir);
-            }
-            let Some(path) = dialog.pick_file() else {
-                return; // user cancelled
-            };
+                let mut dialog = rfd::FileDialog::new()
+                    .add_filter("Telemetry log", &["ld", "ibt", "tsv", "csv"])
+                    .add_filter("MoTeC log", &["ld"])
+                    .add_filter("iRacing telemetry", &["ibt"])
+                    .add_filter("shtep TSV export", &["tsv"])
+                    .add_filter("acr_telemetry CSV export", &["csv"])
+                    .set_title("Open a .ld, .ibt, .tsv, or .csv telemetry log");
+                if let Some(dir) = state
+                    .borrow()
+                    .install_paths
+                    .as_ref()
+                    .map(|p| p.ngp_telemetry_dir.clone())
+                {
+                    dialog = dialog.set_directory(dir);
+                }
+                let Some(path) = dialog.pick_file() else {
+                    return; // user cancelled
+                };
 
-            load_file(&window, &state, &path);
-            refresh_replay_status(&window, &state);
+                load_file(&window, &state, &path);
+                refresh_replay_status(&window, &state);
+            });
         });
     }
 
@@ -283,23 +293,37 @@ fn main() -> Result<(), slint::PlatformError> {
         let window_weak = window.as_weak();
         let state = state.clone();
         window.on_set_install_root(move || {
-            let Some(window) = window_weak.upgrade() else {
-                return;
-            };
-            let Some(root) = rfd::FileDialog::new()
-                .set_title("Select the RBR install root (e.g. C:\\Richard Burns Rally)")
-                .pick_folder()
-            else {
-                return; // user cancelled
-            };
+            // rfd's native dialog blocks this thread while modal, which
+            // also happens to be the thread pumping Slint's event loop. On
+            // Windows that lets the click that opened the dialog leave its
+            // mouse-up message queued until the dialog closes; Slint then
+            // processes it as a fresh click on the same button, popping the
+            // dialog straight back open (the user has to cancel it a
+            // second time to actually keep the pick). Deferring the whole
+            // body to the next event-loop tick lets that click finish
+            // resolving first, so the dialog only ever fires once per
+            // press.
+            let window_weak = window_weak.clone();
+            let state = state.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(window) = window_weak.upgrade() else {
+                    return;
+                };
+                let Some(root) = rfd::FileDialog::new()
+                    .set_title("Select the RBR install root (e.g. C:\\Richard Burns Rally)")
+                    .pick_folder()
+                else {
+                    return; // user cancelled
+                };
 
-            apply_install_root(&window, &state, root.clone());
+                apply_install_root(&window, &state, root.clone());
 
-            // Best-effort: failing to persist just means this root has to
-            // be re-picked next launch, not that it stops working now.
-            if let Some(dir) = config_dir() {
-                let _ = sde_app::config::save_install_root(&dir, &root);
-            }
+                // Best-effort: failing to persist just means this root has to
+                // be re-picked next launch, not that it stops working now.
+                if let Some(dir) = config_dir() {
+                    let _ = sde_app::config::save_install_root(&dir, &root);
+                }
+            });
         });
     }
 
@@ -307,50 +331,57 @@ fn main() -> Result<(), slint::PlatformError> {
         let window_weak = window.as_weak();
         let state = state.clone();
         window.on_open_replay_info(move || {
-            let Some(window) = window_weak.upgrade() else {
-                return;
-            };
-
-            let mut dialog = rfd::FileDialog::new()
-                .add_filter("Replay metadata", &["ini"])
-                .set_title("Open a replay metadata (.ini) sidecar");
-            if let Some(dir) = state
-                .borrow()
-                .install_paths
-                .as_ref()
-                .map(|p| p.replays_dir.clone())
-            {
-                dialog = dialog.set_directory(dir);
-            }
-            let Some(path) = dialog.pick_file() else {
-                return; // user cancelled
-            };
-
-            match sde_rbr::parse_replay_ini(&path) {
-                Ok(replay) => {
-                    let mut state_mut = state.borrow_mut();
-                    state_mut.replay_info = Some(replay);
-                    // A manual pick, not an auto-match.
-                    state_mut.replay_auto_match_gap = None;
-                }
-                Err(e) => {
-                    window.set_replay_status_text(format!("Error loading replay info: {e}").into());
+            // See the comment on `on_set_install_root` above: deferred so
+            // the blocking native dialog doesn't reopen itself off the
+            // triggering click's queued mouse-up.
+            let window_weak = window_weak.clone();
+            let state = state.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(window) = window_weak.upgrade() else {
                     return;
-                }
-            }
-            refresh_replay_status(&window, &state);
+                };
 
-            // A different replay means a different run, so its setup takes
-            // over — but only if one actually resolves. Failing to find it
-            // leaves whatever the panel had (possibly a manually opened
-            // sheet), rather than clearing the panel as a side effect of
-            // picking a replay.
-            if let Some(setup) = auto_resolve_setup(&state) {
-                let mut state_mut = state.borrow_mut();
-                state_mut.setup = Some(setup);
-                state_mut.setup_compare = None;
-            }
-            refresh_setup_panel(&window, &state);
+                let mut dialog = rfd::FileDialog::new()
+                    .add_filter("Replay metadata", &["ini"])
+                    .set_title("Open a replay metadata (.ini) sidecar");
+                if let Some(dir) = state
+                    .borrow()
+                    .install_paths
+                    .as_ref()
+                    .map(|p| p.replays_dir.clone())
+                {
+                    dialog = dialog.set_directory(dir);
+                }
+                let Some(path) = dialog.pick_file() else {
+                    return; // user cancelled
+                };
+
+                match sde_rbr::parse_replay_ini(&path) {
+                    Ok(replay) => {
+                        let mut state_mut = state.borrow_mut();
+                        state_mut.replay_info = Some(replay);
+                        // A manual pick, not an auto-match.
+                        state_mut.replay_auto_match_gap = None;
+                    }
+                    Err(e) => {
+                        window.set_replay_status_text(format!("Error loading replay info: {e}").into());
+                        return;
+                    }
+                }
+                refresh_replay_status(&window, &state);
+
+                // A different replay means a different run, so its setup takes
+                // over — but only if one actually resolves. Failing to find it
+                // leaves whatever the panel had (possibly a manually opened
+                // sheet), rather than clearing the panel as a side effect of
+                // picking a replay.
+                if let Some(setup) = auto_resolve_setup(&state) {
+                    let mut state_mut = state.borrow_mut();
+                    state_mut.setup = Some(setup);
+                    state_mut.setup_compare = None;
+                }
+                refresh_setup_panel(&window, &state);
+            });
         });
     }
 
@@ -358,22 +389,29 @@ fn main() -> Result<(), slint::PlatformError> {
         let window_weak = window.as_weak();
         let state = state.clone();
         window.on_open_setup(move || {
-            let Some(window) = window_weak.upgrade() else {
-                return;
-            };
-            let Some(setup) = pick_setup(&state, "Open a car setup (.lsp)") else {
-                return;
-            };
-            {
-                let mut state_mut = state.borrow_mut();
-                state_mut.setup = Some(setup);
-                // A newly picked *primary* setup invalidates any active
-                // comparison — the pair the user set up was between two
-                // specific sheets, and silently re-pointing one half of it
-                // would show a diff they never asked for.
-                state_mut.setup_compare = None;
-            }
-            refresh_setup_panel(&window, &state);
+            // See the comment on `on_set_install_root` above: deferred so
+            // the blocking native dialog doesn't reopen itself off the
+            // triggering click's queued mouse-up.
+            let window_weak = window_weak.clone();
+            let state = state.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(window) = window_weak.upgrade() else {
+                    return;
+                };
+                let Some(setup) = pick_setup(&state, "Open a car setup (.lsp)") else {
+                    return;
+                };
+                {
+                    let mut state_mut = state.borrow_mut();
+                    state_mut.setup = Some(setup);
+                    // A newly picked *primary* setup invalidates any active
+                    // comparison — the pair the user set up was between two
+                    // specific sheets, and silently re-pointing one half of it
+                    // would show a diff they never asked for.
+                    state_mut.setup_compare = None;
+                }
+                refresh_setup_panel(&window, &state);
+            });
         });
     }
 
@@ -381,14 +419,21 @@ fn main() -> Result<(), slint::PlatformError> {
         let window_weak = window.as_weak();
         let state = state.clone();
         window.on_compare_setup(move || {
-            let Some(window) = window_weak.upgrade() else {
-                return;
-            };
-            let Some(setup) = pick_setup(&state, "Compare against a car setup (.lsp)") else {
-                return;
-            };
-            state.borrow_mut().setup_compare = Some(setup);
-            refresh_setup_panel(&window, &state);
+            // See the comment on `on_set_install_root` above: deferred so
+            // the blocking native dialog doesn't reopen itself off the
+            // triggering click's queued mouse-up.
+            let window_weak = window_weak.clone();
+            let state = state.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(window) = window_weak.upgrade() else {
+                    return;
+                };
+                let Some(setup) = pick_setup(&state, "Compare against a car setup (.lsp)") else {
+                    return;
+                };
+                state.borrow_mut().setup_compare = Some(setup);
+                refresh_setup_panel(&window, &state);
+            });
         });
     }
 
