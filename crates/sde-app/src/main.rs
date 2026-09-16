@@ -192,6 +192,9 @@ const VIEW_HEIGHT: f64 = 1000.0;
 #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
 const GRID_COLUMNS: i32 = graph::DOCK_GRID_COLUMNS as i32;
 
+/// Number of y-axis gridlines drawn on a single-channel dock.
+const GRIDLINE_COUNT: usize = 4;
+
 /// Where the install-root config file lives: `%APPDATA%\sde-app\` on
 /// Windows (this app's only target platform today — see `Cargo.toml`).
 /// `None` if `%APPDATA%` isn't set, in which case the install root simply
@@ -998,6 +1001,52 @@ fn main() -> Result<(), slint::PlatformError> {
 /// while a multi-channel overlay dock prefixes each with its channel name
 /// (`"BRAKE: 80.0   THROTTLE: 0.0"`) so the values stay identifiable once
 /// more than one channel shares the graph.
+/// The dock header's "value at rest" readout (`DockData.latest-value-text`):
+/// each channel in `group`'s value at the *end* of each of `ranges`
+/// (pipe-separated when comparing laps), unit-suffixed, in the same
+/// bare-vs-`"name: value"` shape as [`cursor_text_for_group`]. Computed
+/// straight from `session.channels` rather than `state.plotted`, since
+/// this runs unconditionally on every `replot` — including the first
+/// `replot` after a dock's channels change, before `state.plotted` has
+/// necessarily been rebuilt for them.
+fn latest_value_text_for_group(
+    session: &sde_core::Session,
+    group: &[String],
+    ranges: &[(f64, f64)],
+) -> String {
+    let parts: Vec<String> = group
+        .iter()
+        .map(|name| {
+            let units = session.channels.get(name).map(|c| c.units.as_str());
+            let values = session.channels.get(name).map_or_else(String::new, |c| {
+                ranges
+                    .iter()
+                    .filter_map(|&(_, end)| {
+                        graph::value_at_raw(&c.timecodes, &c.values, c.interpolate, end).map(|v| {
+                            match units {
+                                Some(u) if !u.is_empty() => format!("{v:.3} {u}"),
+                                _ => format!("{v:.3}"),
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            });
+            let values = if values.is_empty() {
+                "n/a".to_string()
+            } else {
+                values
+            };
+            if group.len() == 1 {
+                values
+            } else {
+                format!("{name}: {values}")
+            }
+        })
+        .collect();
+    parts.join("   ")
+}
+
 fn cursor_text_for_group(state: &AppState, group: &[String], abs_times: &[f64]) -> String {
     let parts: Vec<String> = group
         .iter()
@@ -1682,6 +1731,10 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
         // channel. Backs the per-channel legend's remove control.
         let mut channel_legend: Vec<LegendEntry> = Vec::new();
         let mut any_data = false;
+        // Only ever set for a single-channel dock (see below) — an
+        // overlay dock has no single shared y-scale to draw gridlines
+        // against.
+        let mut single_channel_range: Option<(f64, f64)> = None;
         // One color per (channel, lap-range) combination generated,
         // sequential in that order — for the common single-channel case
         // this is exactly the old per-lap coloring; overlaying channels
@@ -1716,6 +1769,9 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
                 distance_channel,
             ) {
                 any_data = true;
+                if group.len() == 1 {
+                    single_channel_range = Some((plot.min_val, plot.max_val));
+                }
                 // Only label traces when the dock overlays more than one
                 // channel — with a single channel the dock header already
                 // names it, and lap comparison already has its own
@@ -1760,7 +1816,22 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
             _ => String::new(),
         };
 
+        let latest_value_text = latest_value_text_for_group(session, group, &ranges);
+
         if any_data {
+            #[allow(clippy::cast_possible_truncation)]
+            let gridlines: Vec<GridlineData> = single_channel_range
+                .map(|(min_val, max_val)| {
+                    graph::gridline_values(min_val, max_val, GRIDLINE_COUNT)
+                        .into_iter()
+                        .map(|(y, v)| GridlineData {
+                            y: y as f32,
+                            label: format!("{v:.3}").into(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
             docks.push(DockData {
                 channel_name: channel_name.into(),
                 channel_units: channel_units.into(),
@@ -1777,6 +1848,8 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
                 status_text: String::new().into(),
                 grid_row,
                 grid_col,
+                gridlines: slint::ModelRc::new(slint::VecModel::from(gridlines)),
+                latest_value_text: latest_value_text.into(),
             });
         } else {
             #[allow(clippy::cast_possible_truncation)]
@@ -1791,6 +1864,8 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
                 status_text: "No samples in this range.".into(),
                 grid_row,
                 grid_col,
+                gridlines: slint::ModelRc::new(slint::VecModel::from(Vec::<GridlineData>::new())),
+                latest_value_text: String::new().into(),
             });
         }
     }
