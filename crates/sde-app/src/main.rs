@@ -364,7 +364,9 @@ fn main() -> Result<(), slint::PlatformError> {
                         state_mut.replay_auto_match_gap = None;
                     }
                     Err(e) => {
-                        window.set_replay_status_text(format!("Error loading replay info: {e}").into());
+                        window.set_replay_status_text(
+                            format!("Error loading replay info: {e}").into(),
+                        );
                         return;
                     }
                 }
