@@ -2143,10 +2143,7 @@ mod tests {
             "Brake".to_string(),
         ]];
         assert!(remove_channel_from_dock(&mut docks, 0, "Throttle"));
-        assert_eq!(
-            docks,
-            vec![vec!["Speed".to_string(), "Brake".to_string()]]
-        );
+        assert_eq!(docks, vec![vec!["Speed".to_string(), "Brake".to_string()]]);
     }
 
     #[test]
