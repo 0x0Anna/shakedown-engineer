@@ -1044,6 +1044,184 @@ pub fn remove_channel_from_dock(docks: &mut [Vec<String>], dock: usize, channel:
     true
 }
 
+/// What content a worksheet dock renders. Parallel to `main.rs`'s
+/// `AppState::dock_channels` (same index, same length always) rather than
+/// folded into `Vec<Vec<String>>` itself, so every existing
+/// `dock_channels`-mutating function above (`reorder_docks`,
+/// `merge_docks`, …) keeps working with plain channel-name lists, unaware
+/// dock kinds exist at all — `main.rs` applies the same index operation to
+/// both vectors in lockstep instead.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum DockKind {
+    #[default]
+    TimeSeries,
+    /// A g-g friction circle scatter — see [`build_gg_scatter_plot`]. The
+    /// two channel names are kept here (rather than re-resolved from
+    /// `dock_channels[i]` every time) so the dock's title and channel
+    /// resolution stay unambiguous even though `dock_channels[i]` for this
+    /// kind holds the same two names in `[lat, long]` order.
+    GgCircle {
+        lat_channel: String,
+        long_channel: String,
+    },
+}
+
+/// Standard gravity, m/s², used to convert an acceleration channel's raw
+/// values into g (see [`build_gg_scatter_plot`]'s unit handling).
+const STANDARD_GRAVITY: f64 = 9.806_65;
+
+/// Candidate lateral-g channel names, checked in order, same shape/spirit
+/// as [`DEFAULT_DOCK_ROLES`]: ACR/ACC's `g_force_x`, TDA-style `G Force
+/// Lat`, and iRacing's `LatAccel`/`GForceX`.
+///
+/// Deliberately excludes RBR/NGP's `vecLinearAccelerationCar.*`/
+/// `vecRelativeLinearAcceleration.*` — real-capture investigation found
+/// those channels reading implausible magnitudes (on the order of 3000)
+/// suggesting an unresolved unit/scale bug in that exporter. Not safe to
+/// plot as g until that's separately investigated; see the "Follow-up
+/// roadmap" note in PROJECT_PLAN.md.
+const LAT_G_CANDIDATES: &[&str] = &["g_force_x", "G Force Lat", "LatAccel", "GForceX"];
+
+/// Candidate longitudinal-g channel names — see [`LAT_G_CANDIDATES`].
+const LONG_G_CANDIDATES: &[&str] = &["g_force_y", "G Force Long", "LongAccel", "GForceY"];
+
+/// Resolve `(lat_channel_name, long_channel_name)` for a new g-g circle
+/// dock, or `None` if `session` has neither a recognized lateral nor
+/// longitudinal g-force channel name (see [`LAT_G_CANDIDATES`]/
+/// [`LONG_G_CANDIDATES`]). Both must resolve — a one-sided g-g circle
+/// isn't meaningful — so callers (see `main.rs`'s "Add g-g circle dock"
+/// handler) can show one clear failure message instead of guessing which
+/// axis was missing.
+#[must_use]
+pub fn resolve_gg_channel_names(session: &sde_core::Session) -> Option<(String, String)> {
+    let lat = LAT_G_CANDIDATES
+        .iter()
+        .find(|name| session.channels.contains_key(**name))?;
+    let long = LONG_G_CANDIDATES
+        .iter()
+        .find(|name| session.channels.contains_key(**name))?;
+    Some(((*lat).to_string(), (*long).to_string()))
+}
+
+/// The minimum half-width (in g) the g-g scatter's axes ever scale to,
+/// even if every sample in `ranges` falls well inside it — so a mild
+/// session (never braking/cornering anywhere near the car's actual grip
+/// limit) doesn't render as a speck in the middle of the plot.
+const MIN_GG_EXTENT_G: f64 = 1.5;
+
+/// Points and reference circle for a g-g friction circle dock: the car's
+/// (lateral-g, longitudinal-g) trace over `ranges`, plus a fixed
+/// reference circle at 1g so the driver can see how much of the
+/// available grip is actually being used. Built by
+/// [`build_gg_scatter_plot`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct GgScatterPlot {
+    pub trace_commands: String,
+    pub reference_circle_commands: String,
+    pub view_width: f64,
+    pub view_height: f64,
+}
+
+/// An SVG-path-style circle of radius `1g` (scaled the same way
+/// [`build_gg_scatter_plot`] scales its trace, via `scale`/`view_width`/
+/// `view_height`), approximated as a many-sided polygon — Slint's `Path`
+/// element takes the same `M`/`L` command syntax already used everywhere
+/// else in this module, so a true arc command isn't needed for something
+/// this size to read as a smooth circle.
+fn unit_circle_commands(scale: f64, view_width: f64, view_height: f64) -> String {
+    const SEGMENTS: usize = 64;
+    let (cx, cy) = (view_width / 2.0, view_height / 2.0);
+    let mut commands = String::new();
+    for i in 0..=SEGMENTS {
+        let theta = 2.0 * std::f64::consts::PI * (i as f64) / (SEGMENTS as f64);
+        let x = cx + theta.cos() * scale;
+        let y = cy - theta.sin() * scale;
+        let _ = if i == 0 {
+            write!(commands, "M {x} {y} ")
+        } else {
+            write!(commands, "L {x} {y} ")
+        };
+    }
+    commands
+}
+
+/// Build a g-g friction circle scatter: `lat_channel`/`long_channel`'s
+/// values (converted to g based on each channel's `units`) over `ranges`, plotted as
+/// one (lateral-g, longitudinal-g) point per sample of `lat_channel`,
+/// paired against `long_channel`'s value at that same timecode (via
+/// [`value_at`] — the two channels don't need identical timecodes, only
+/// to come from the same session).
+///
+/// Scaled with **equal** x/y scale (never independent stretch — a circle
+/// must stay a circle) to the larger of the data's own extent or
+/// [`MIN_GG_EXTENT_G`], so the plot is always square-scaled regardless of
+/// `view_width`/`view_height`'s own aspect ratio (the caller is expected
+/// to render with `fit: contain`, matching that).
+///
+/// Returns `None` if `ranges` is empty or no sample of `lat_channel` in
+/// any range has a paired `long_channel` value.
+#[must_use]
+pub fn build_gg_scatter_plot(
+    lat_channel: &Channel,
+    long_channel: &Channel,
+    ranges: &[(f64, f64)],
+    view_width: f64,
+    view_height: f64,
+) -> Option<GgScatterPlot> {
+    if ranges.is_empty() {
+        return None;
+    }
+
+    let g_factor = |units: &str| match units {
+        "m/s^2" | "m/s/s" => 1.0 / STANDARD_GRAVITY,
+        _ => 1.0,
+    };
+    let lat_factor = g_factor(&lat_channel.units);
+    let long_factor = g_factor(&long_channel.units);
+
+    let points: Vec<(f64, f64)> = ranges
+        .iter()
+        .flat_map(|&(start, end)| {
+            decimate_for_display(windowed_samples(lat_channel, start, end), view_width)
+                .into_iter()
+                .filter_map(|(t, lat_v)| {
+                    value_at(long_channel, t)
+                        .map(|long_v| (lat_v * lat_factor, long_v * long_factor))
+                })
+        })
+        .collect();
+
+    if points.is_empty() {
+        return None;
+    }
+
+    let data_extent = points
+        .iter()
+        .flat_map(|&(x, y)| [x.abs(), y.abs()])
+        .fold(0.0_f64, f64::max);
+    let extent = data_extent.max(MIN_GG_EXTENT_G);
+    let scale = view_width.min(view_height) / (2.0 * extent);
+    let (cx, cy) = (view_width / 2.0, view_height / 2.0);
+
+    let mut trace_commands = String::new();
+    for (i, &(lat_g, long_g)) in points.iter().enumerate() {
+        let x = cx + lat_g * scale;
+        let y = cy - long_g * scale;
+        let _ = if i == 0 {
+            write!(trace_commands, "M {x} {y} ")
+        } else {
+            write!(trace_commands, "L {x} {y} ")
+        };
+    }
+
+    Some(GgScatterPlot {
+        trace_commands,
+        reference_circle_commands: unit_circle_commands(scale, view_width, view_height),
+        view_width,
+        view_height,
+    })
+}
+
 /// All channel names in `session`, sorted alphabetically — the unfiltered
 /// list backing the channel search/picker.
 #[must_use]
@@ -2284,5 +2462,146 @@ mod tests {
 
         let varying = channel(true);
         assert!(channel_has_data(&varying));
+    }
+
+    #[test]
+    fn resolve_gg_channel_names_prefers_acr_style_names() {
+        let session = session_with(vec![stub_channel("g_force_x"), stub_channel("g_force_y")]);
+        assert_eq!(
+            resolve_gg_channel_names(&session),
+            Some(("g_force_x".to_string(), "g_force_y".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_gg_channel_names_falls_back_to_iracing_names() {
+        let session = session_with(vec![stub_channel("LatAccel"), stub_channel("LongAccel")]);
+        assert_eq!(
+            resolve_gg_channel_names(&session),
+            Some(("LatAccel".to_string(), "LongAccel".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_gg_channel_names_none_when_only_one_axis_present() {
+        let session = session_with(vec![stub_channel("LatAccel")]);
+        assert_eq!(resolve_gg_channel_names(&session), None);
+    }
+
+    #[test]
+    fn resolve_gg_channel_names_excludes_the_buggy_rbr_ngp_names() {
+        let session = session_with(vec![
+            stub_channel("vecLinearAccelerationCar.x"),
+            stub_channel("vecLinearAccelerationCar.y"),
+        ]);
+        assert_eq!(resolve_gg_channel_names(&session), None);
+    }
+
+    fn gg_channel(units: &str, values: Vec<f64>) -> Channel {
+        let timecodes = (0..values.len()).map(|i| i as f64 * 10.0).collect();
+        Channel {
+            name: "gg".into(),
+            units: units.into(),
+            dec_pts: 3,
+            interpolate: true,
+            timecodes,
+            values,
+        }
+    }
+
+    #[test]
+    fn build_gg_scatter_plot_converts_meters_per_second_squared_to_g() {
+        let lat = gg_channel("m/s^2", vec![STANDARD_GRAVITY, -STANDARD_GRAVITY]);
+        let long = gg_channel("m/s^2", vec![0.0, 0.0]);
+        let plot = build_gg_scatter_plot(&lat, &long, &[(0.0, 10.0)], 1000.0, 1000.0).unwrap();
+        // 1g of lateral accel with MIN_GG_EXTENT_G's 1.5g half-width scale
+        // should land noticeably off-center, not squashed to a speck.
+        assert!(plot.trace_commands.starts_with("M "));
+        assert!(plot.trace_commands.contains("L "));
+    }
+
+    #[test]
+    fn build_gg_scatter_plot_already_in_g_is_passed_through() {
+        let lat = gg_channel("g", vec![1.0]);
+        let long = gg_channel("g", vec![0.0]);
+        let plot = build_gg_scatter_plot(&lat, &long, &[(0.0, 0.0)], 1000.0, 1000.0).unwrap();
+        // scale = 500 / 1.5 (data extent 1.0 < MIN_GG_EXTENT_G); x = 500 + 1.0*scale.
+        let scale = 1000.0_f64.min(1000.0) / (2.0 * MIN_GG_EXTENT_G);
+        assert!(plot
+            .trace_commands
+            .contains(&format!("M {} 500", 500.0 + scale)));
+    }
+
+    #[test]
+    fn build_gg_scatter_plot_extent_grows_past_the_minimum_for_hard_data() {
+        // 3g lateral spike should widen the scale beyond MIN_GG_EXTENT_G's
+        // implied one, i.e. shrink the reference (1g) circle's radius
+        // below what a mild session would draw it at.
+        let mild_lat = gg_channel("g", vec![0.5]);
+        let mild_long = gg_channel("g", vec![0.0]);
+        let mild =
+            build_gg_scatter_plot(&mild_lat, &mild_long, &[(0.0, 0.0)], 1000.0, 1000.0).unwrap();
+
+        let hard_lat = gg_channel("g", vec![3.0]);
+        let hard_long = gg_channel("g", vec![0.0]);
+        let hard =
+            build_gg_scatter_plot(&hard_lat, &hard_long, &[(0.0, 0.0)], 1000.0, 1000.0).unwrap();
+
+        // Both reference circles start with "M <cx + scale> <cy>"; the
+        // harder session's scale (and so its reference circle's drawn
+        // radius) must be smaller.
+        assert_ne!(
+            mild.reference_circle_commands,
+            hard.reference_circle_commands
+        );
+    }
+
+    #[test]
+    fn build_gg_scatter_plot_none_for_empty_ranges() {
+        let lat = gg_channel("g", vec![1.0]);
+        let long = gg_channel("g", vec![0.0]);
+        assert!(build_gg_scatter_plot(&lat, &long, &[], 1000.0, 1000.0).is_none());
+    }
+
+    /// Regression guard against silently plotting a raw-unit bug the way
+    /// RBR/NGP's `vecLinearAccelerationCar.*` does (see
+    /// `LAT_G_CANDIDATES`'s doc comment) — resolves the real iRacing
+    /// `LatAccel`/`LongAccel` channels from a real capture and asserts the
+    /// converted values land within a generous but still bug-catching
+    /// bound. ±20g comfortably covers this fixture's genuine crash-impact
+    /// spike (observed up to ~15g) while still catching anything on the
+    /// order of RBR/NGP's ~3000-magnitude bug.
+    #[test]
+    fn build_gg_scatter_plot_against_real_ibt_fixture_stays_in_a_sane_g_range() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../.sample-data/iRacing/Hell RX/Ford_Fiesta_RS_WRC/fordfiestarswrc_lankebanen hellrx 2026-07-27 21-04-21.ibt",
+        );
+        let Ok(session) = sde_core::Session::load_ibt(&path) else {
+            eprintln!("skipping: real .ibt fixture not available at {path:?}");
+            return;
+        };
+
+        let (lat_name, long_name) =
+            resolve_gg_channel_names(&session).expect("fixture has LatAccel/LongAccel");
+        assert_eq!(lat_name, "LatAccel");
+        assert_eq!(long_name, "LongAccel");
+        let lat = &session.channels[&lat_name];
+        let long = &session.channels[&long_name];
+        assert_eq!(lat.units, "m/s^2");
+        assert_eq!(long.units, "m/s^2");
+
+        let (start, end) = session_time_range(&session);
+        // Exercises the exact code path a real g-g circle dock renders
+        // through, not just the unit-conversion math in isolation.
+        assert!(build_gg_scatter_plot(lat, long, &[(start, end)], 1000.0, 1000.0).is_some());
+
+        let to_g = |v: f64| v / STANDARD_GRAVITY;
+        for &raw in lat.values.iter().chain(long.values.iter()) {
+            let g = to_g(raw);
+            assert!(
+                g.abs() < 20.0,
+                "implausible g value {g} in LatAccel/LongAccel — possible raw-unit bug"
+            );
+        }
     }
 }

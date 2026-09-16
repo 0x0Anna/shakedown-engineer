@@ -33,13 +33,22 @@ export struct GridlineData {
     label: string,
 }
 
+// Points and reference circle for a g-g friction circle dock (see
+// `graph::build_gg_scatter_plot`) — an alternative to `series` for a
+// `DockData` whose `kind` is `1`.
+export struct GgCircleData {
+    trace-commands: string,
+    reference-commands: string,
+}
+
 export struct DockData {
     channel-name: string,
     channel-units: string,
     // One series per (channel, lap) combination in the dock: normally
     // just one channel x one lap/"All"; more when comparing laps and/or
     // overlaying multiple channels in one dock (see
-    // `graph::build_lap_comparison_plot`).
+    // `graph::build_lap_comparison_plot`). Only meaningful when `kind ==
+    // 0`; empty for a g-g circle dock, which renders `gg-circle` instead.
     series: [SeriesData],
     // One entry per distinct channel plotted in this dock, in the same
     // color a channel's traces use — only populated when the dock
@@ -64,6 +73,11 @@ export struct DockData {
     // Overridden live by the drag-cursor readout (`cursor-value`) while
     // dragging.
     latest-value-text: string,
+    // What this dock renders: `0` = the normal time-series line graph
+    // (`series`), `1` = a g-g friction circle scatter (`gg-circle`). See
+    // `graph::DockKind`.
+    kind: int,
+    gg-circle: GgCircleData,
 }
 
 // One line in the setup panel: either a group header or a value/diff row.
@@ -284,107 +298,156 @@ component DockPanel {
                 color: gray;
             }
 
-            TouchArea {
-                width: 100%;
-                height: 100%;
-
-                moved => {
-                    if (self.pressed && self.width > 0px) {
-                        root.cursor-moved(max(0.0, min(1.0, self.mouse-x / self.width)));
-                    }
-                }
-                pointer-event(event) => {
-                    if (event.kind == PointerEventKind.down && self.width > 0px) {
-                        root.cursor-moved(max(0.0, min(1.0, self.mouse-x / self.width)));
-                    }
-                }
-                scroll-event(event) => {
-                    // Plain, unmodified scroll is rejected rather than
-                    // accepted, so it falls through to the "Stacked"
-                    // layout's `ListView` and scrolls the worksheet like
-                    // any normal page — without this, whichever dock
-                    // happened to be under the cursor mid-scroll would
-                    // zoom instead of the list moving, since every dock's
-                    // graph otherwise unconditionally accepted every
-                    // scroll event that crossed it. Ctrl+scroll is the
-                    // deliberate "I mean to zoom this chart" signal,
-                    // matching the same modifier-gated pattern other
-                    // tools (Figma, Google Maps, ...) use for scroll-to-
-                    // zoom over scrollable content.
-                    //
-                    // Shift/Alt alone (no Ctrl) still pan, unchanged from
-                    // before this gating was added: holding one of them
-                    // is already a deliberate gesture on its own — it's
-                    // only *plain* scroll that's ambiguous with "just
-                    // scrolling the page" — so requiring Ctrl on top of
-                    // Shift/Alt too would only relearn a shortcut that
-                    // was never actually accident-prone.
-                    if (!event.modifiers.control && !event.modifiers.shift && !event.modifiers.alt) {
-                        reject
-                    } else {
-                        // A plain mouse wheel only ever reports `delta-y`
-                        // (vertical), which `graph::zoom_scroll` reads as
-                        // zoom — there's no way to pan a zoomed-in window
-                        // without a trackpad's native `delta-x`. Holding
-                        // Shift or Alt redirects that same vertical wheel
-                        // motion into `delta-x` instead, the conventional
-                        // "modifier turns vertical scroll into
-                        // horizontal" gesture most apps already use.
-                        root.zoom-scrolled(
-                            event.delta-x / 1px + ((event.modifiers.shift || event.modifiers.alt) ? event.delta-y / 1px : 0),
-                            (event.modifiers.shift || event.modifiers.alt) ? 0 : event.delta-y / 1px,
-                            max(0.0, min(1.0, self.mouse-x / self.width)));
-                        accept
-                    }
-                }
-            }
-
-            for g in root.dock.gridlines: Rectangle {
-                x: 0px;
-                y: g.y * parent.height;
-                width: 100%;
-                height: 1px;
-                background: #3a3f4b;
-
-                Text {
-                    x: 4px;
-                    // Labels sit just below their line, except the
-                    // bottom-most one (which would otherwise run off the
-                    // dock's lower edge), which sits just above instead.
-                    y: g.y < 0.9 ? 2px : -self.height - 2px;
-                    text: g.label;
-                    font-size: 9px;
-                    color: gray;
-                }
-            }
-
-            for s in root.dock.series: Path {
+            // A g-g friction circle (`kind == 1`) has no meaningful shared
+            // linear cursor fraction to drag or scroll-zoom, so the whole
+            // interactive touch area/cursor-line/scroll-zoom setup below
+            // is simply absent for that branch rather than repurposed —
+            // see `graph::DockKind`'s doc comment.
+            if root.dock.kind == 0: Rectangle {
                 x: 0px;
                 y: 0px;
                 width: 100%;
                 height: 100%;
-                commands: s.commands;
-                stroke: s.color;
-                stroke-width: 1.5px;
-                viewbox-width: root.dock.view-width;
-                viewbox-height: root.dock.view-height;
-                // Path defaults to `fit: contain`, which preserves the
-                // viewbox's aspect ratio and letterboxes — since the
-                // viewbox is always a 1000x1000 square (see
-                // `VIEW_WIDTH`/`VIEW_HEIGHT` in main.rs) but docks are
-                // wide rectangles, that left large blank margins on
-                // either side of the trace. `fill` stretches x/y
-                // independently to the element's actual size instead,
-                // which is what a time/value plot needs.
-                fit: fill;
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+
+                    moved => {
+                        if (self.pressed && self.width > 0px) {
+                            root.cursor-moved(max(0.0, min(1.0, self.mouse-x / self.width)));
+                        }
+                    }
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down && self.width > 0px) {
+                            root.cursor-moved(max(0.0, min(1.0, self.mouse-x / self.width)));
+                        }
+                    }
+                    scroll-event(event) => {
+                        // Plain, unmodified scroll is rejected rather than
+                        // accepted, so it falls through to the "Stacked"
+                        // layout's `ListView` and scrolls the worksheet like
+                        // any normal page — without this, whichever dock
+                        // happened to be under the cursor mid-scroll would
+                        // zoom instead of the list moving, since every dock's
+                        // graph otherwise unconditionally accepted every
+                        // scroll event that crossed it. Ctrl+scroll is the
+                        // deliberate "I mean to zoom this chart" signal,
+                        // matching the same modifier-gated pattern other
+                        // tools (Figma, Google Maps, ...) use for scroll-to-
+                        // zoom over scrollable content.
+                        //
+                        // Shift/Alt alone (no Ctrl) still pan, unchanged from
+                        // before this gating was added: holding one of them
+                        // is already a deliberate gesture on its own — it's
+                        // only *plain* scroll that's ambiguous with "just
+                        // scrolling the page" — so requiring Ctrl on top of
+                        // Shift/Alt too would only relearn a shortcut that
+                        // was never actually accident-prone.
+                        if (!event.modifiers.control && !event.modifiers.shift && !event.modifiers.alt) {
+                            reject
+                        } else {
+                            // A plain mouse wheel only ever reports `delta-y`
+                            // (vertical), which `graph::zoom_scroll` reads as
+                            // zoom — there's no way to pan a zoomed-in window
+                            // without a trackpad's native `delta-x`. Holding
+                            // Shift or Alt redirects that same vertical wheel
+                            // motion into `delta-x` instead, the conventional
+                            // "modifier turns vertical scroll into
+                            // horizontal" gesture most apps already use.
+                            root.zoom-scrolled(
+                                event.delta-x / 1px + ((event.modifiers.shift || event.modifiers.alt) ? event.delta-y / 1px : 0),
+                                (event.modifiers.shift || event.modifiers.alt) ? 0 : event.delta-y / 1px,
+                                max(0.0, min(1.0, self.mouse-x / self.width)));
+                            accept
+                        }
+                    }
+                }
+
+                for g in root.dock.gridlines: Rectangle {
+                    x: 0px;
+                    y: g.y * parent.height;
+                    width: 100%;
+                    height: 1px;
+                    background: #3a3f4b;
+
+                    Text {
+                        x: 4px;
+                        // Labels sit just below their line, except the
+                        // bottom-most one (which would otherwise run off the
+                        // dock's lower edge), which sits just above instead.
+                        y: g.y < 0.9 ? 2px : -self.height - 2px;
+                        text: g.label;
+                        font-size: 9px;
+                        color: gray;
+                    }
+                }
+
+                for s in root.dock.series: Path {
+                    x: 0px;
+                    y: 0px;
+                    width: 100%;
+                    height: 100%;
+                    commands: s.commands;
+                    stroke: s.color;
+                    stroke-width: 1.5px;
+                    viewbox-width: root.dock.view-width;
+                    viewbox-height: root.dock.view-height;
+                    // Path defaults to `fit: contain`, which preserves the
+                    // viewbox's aspect ratio and letterboxes — since the
+                    // viewbox is always a 1000x1000 square (see
+                    // `VIEW_WIDTH`/`VIEW_HEIGHT` in main.rs) but docks are
+                    // wide rectangles, that left large blank margins on
+                    // either side of the trace. `fill` stretches x/y
+                    // independently to the element's actual size instead,
+                    // which is what a time/value plot needs.
+                    fit: fill;
+                }
+
+                if root.cursor-visible: Rectangle {
+                    x: root.cursor-fraction * parent.width - 1px;
+                    y: 0px;
+                    width: 2px;
+                    height: 100%;
+                    background: #ff5a5a;
+                }
             }
 
-            if root.cursor-visible: Rectangle {
-                x: root.cursor-fraction * parent.width - 1px;
+            // The g-g circle's own rendering: unlike the time-series
+            // branch above, this needs `fit: contain` (not `fill`) — the
+            // viewbox's square aspect ratio must be preserved here, or a
+            // wide dock would stretch the circle into an ellipse and
+            // silently misrepresent how much grip is actually being used.
+            if root.dock.kind == 1: Rectangle {
+                x: 0px;
                 y: 0px;
-                width: 2px;
+                width: 100%;
                 height: 100%;
-                background: #ff5a5a;
+
+                Path {
+                    x: 0px;
+                    y: 0px;
+                    width: 100%;
+                    height: 100%;
+                    commands: root.dock.gg-circle.reference-commands;
+                    stroke: #555a66;
+                    stroke-width: 1px;
+                    viewbox-width: root.dock.view-width;
+                    viewbox-height: root.dock.view-height;
+                    fit: contain;
+                }
+                Path {
+                    x: 0px;
+                    y: 0px;
+                    width: 100%;
+                    height: 100%;
+                    commands: root.dock.gg-circle.trace-commands;
+                    stroke: #4ea1ff;
+                    stroke-width: 1.5px;
+                    viewbox-width: root.dock.view-width;
+                    viewbox-height: root.dock.view-height;
+                    fit: contain;
+                }
             }
 
             // Close button, as a translucent overlay on the graph itself
@@ -430,6 +493,11 @@ export component AppWindow inherits Window {
     // -- state provided by Rust --
     in property <string> window-title: "sde-app — No file loaded";
     in property <string> status-text: "Open a .ld, .ibt, or .tsv telemetry log to begin.";
+    // Feedback for the "Add g-g circle dock" button specifically — kept
+    // separate from `status-text` (which is only ever shown once the
+    // worksheet is fully empty, `docks.length == 0`) so a resolution
+    // failure is still visible when other docks already exist.
+    in property <string> gg-circle-status-text: "";
     in property <bool> cursor-visible: false;
     in property <float> cursor-fraction: 0; // 0..1 across the plotted x range
     in property <string> cursor-time-text: "";
@@ -490,6 +558,7 @@ export component AppWindow inherits Window {
     callback channel-overlay-toggled(string); // toggles a channel in/out of the overlay queue
     callback overlay-add-requested(); // create one new dock overlaying the queued channels
     callback overlay-cleared(); // empty the overlay queue without creating a dock
+    callback gg-circle-add-requested(); // create a new g-g friction circle dock, auto-resolving its channels
     callback lap-selected(int); // index into lap-labels
     callback compare-lap-toggled(int); // index into compare-lap-labels
     callback compare-cleared(); // exit comparison mode entirely, back to the plain lap dropdown
@@ -902,6 +971,17 @@ export component AppWindow inherits Window {
                             clicked => { root.overlay-cleared(); }
                         }
                     }
+                }
+
+                Button {
+                    text: "Add g-g circle dock";
+                    clicked => { root.gg-circle-add-requested(); }
+                }
+                if root.gg-circle-status-text != "": Text {
+                    text: root.gg-circle-status-text;
+                    font-size: 11px;
+                    color: #e6a44a;
+                    wrap: word-wrap;
                 }
 
                 Text {
