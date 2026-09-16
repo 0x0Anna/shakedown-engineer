@@ -116,6 +116,12 @@ struct AppState {
     /// channels (see `overlay_pending`/`channel_overlay_toggled` for how
     /// a multi-channel dock gets created) — usually just one.
     dock_channels: Vec<Vec<String>>,
+    /// What each dock in `dock_channels` renders — parallel to it (same
+    /// index, same length always; see `graph::DockKind`'s doc comment for
+    /// why it's a separate vector rather than folded into
+    /// `dock_channels`). Every function below that mutates `dock_channels`
+    /// by index applies the same operation to this vector in lockstep.
+    dock_kind: Vec<graph::DockKind>,
     /// Channels queued (via Ctrl+click in the sidebar) to become one new
     /// overlay dock once "Add overlay dock" is clicked; cleared after.
     overlay_pending: Vec<String>,
@@ -495,6 +501,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 {
                     // It's already its own standalone dock — remove it.
                     state.dock_channels.remove(pos);
+                    remove_dock_kind(&mut state, pos);
                 } else if !state.dock_channels.iter().any(|g| g.contains(&name)) {
                     // Not on the worksheet at all yet — add it as a new
                     // standalone dock. (If it's already part of a
@@ -502,6 +509,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     // nothing — remove the whole dock via its "x" instead,
                     // since "which dock" would be ambiguous otherwise.)
                     state.dock_channels.push(vec![name]);
+                    state.dock_kind.push(graph::DockKind::TimeSeries);
                 }
             }
             refresh_channel_list(&window, &state);
@@ -520,6 +528,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let mut state_mut = state.borrow_mut();
                 if index < state_mut.dock_channels.len() {
                     state_mut.dock_channels.remove(index);
+                    remove_dock_kind(&mut state_mut, index);
                 }
                 drop(state_mut);
                 refresh_channel_list(&window, &state);
@@ -613,9 +622,19 @@ fn main() -> Result<(), slint::PlatformError> {
             let changed = match (state_mut.dock_drag_source, state_mut.dock_drag_target) {
                 (Some(source), Some(target)) => {
                     if state_mut.dock_drag_merges {
-                        graph::merge_docks(&mut state_mut.dock_channels, source, target)
+                        let changed =
+                            graph::merge_docks(&mut state_mut.dock_channels, source, target);
+                        if changed {
+                            merge_dock_kind(&mut state_mut, source, target);
+                        }
+                        changed
                     } else {
-                        graph::reorder_docks(&mut state_mut.dock_channels, source, target)
+                        let changed =
+                            graph::reorder_docks(&mut state_mut.dock_channels, source, target);
+                        if changed {
+                            reorder_dock_kind(&mut state_mut, source, target);
+                        }
+                        changed
                     }
                 }
                 // A press with no drag (or a drag that ended over nothing)
@@ -666,6 +685,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 if !state_mut.overlay_pending.is_empty() {
                     let group = std::mem::take(&mut state_mut.overlay_pending);
                     state_mut.dock_channels.push(group);
+                    state_mut.dock_kind.push(graph::DockKind::TimeSeries);
                 }
             }
             refresh_channel_list(&window, &state);
@@ -682,6 +702,41 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             state.borrow_mut().overlay_pending.clear();
             refresh_channel_list(&window, &state);
+        });
+    }
+
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_gg_circle_add_requested(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let mut state_mut = state.borrow_mut();
+            let Some(session) = state_mut.session.as_ref() else {
+                return;
+            };
+            match graph::resolve_gg_channel_names(session) {
+                Some((lat_channel, long_channel)) => {
+                    state_mut
+                        .dock_channels
+                        .push(vec![lat_channel.clone(), long_channel.clone()]);
+                    state_mut.dock_kind.push(graph::DockKind::GgCircle {
+                        lat_channel,
+                        long_channel,
+                    });
+                    drop(state_mut);
+                    window.set_gg_circle_status_text(String::new().into());
+                    refresh_channel_list(&window, &state);
+                    replot(&window, &state);
+                }
+                None => {
+                    drop(state_mut);
+                    window.set_gg_circle_status_text(
+                        "No lateral/longitudinal g-force channels found for a g-g circle.".into(),
+                    );
+                }
+            }
         });
     }
 
@@ -922,7 +977,20 @@ fn main() -> Result<(), slint::PlatformError> {
                 for group in &mut state_mut.dock_channels {
                     group.retain(|n| *n != name);
                 }
-                state_mut.dock_channels.retain(|g| !g.is_empty());
+                // Drop the now-empty groups from `dock_channels` and their
+                // paired `dock_kind` entries together, rather than
+                // filtering each independently — two separate `retain`s
+                // could desync if a future edit changed one predicate but
+                // not the other.
+                let kinds = std::mem::take(&mut state_mut.dock_kind);
+                let (channels, kinds): (Vec<_>, Vec<_>) = state_mut
+                    .dock_channels
+                    .drain(..)
+                    .zip(kinds)
+                    .filter(|(g, _)| !g.is_empty())
+                    .unzip();
+                state_mut.dock_channels = channels;
+                state_mut.dock_kind = kinds;
                 state_mut.overlay_pending.retain(|n| *n != name);
                 if let Some(session) = state_mut.session.as_mut() {
                     session.channels.remove(&name);
@@ -1164,6 +1232,38 @@ fn current_range(session: &sde_core::Session, lap_index: usize) -> Option<(f64, 
     } else {
         Some(graph::session_time_range(session))
     }
+}
+
+/// Apply the same "remove dock `index`" operation `graph::reorder_docks`'/
+/// `graph::merge_docks`'s callers already perform on `dock_channels` to
+/// `dock_kind` too, keeping the two vectors parallel. Used at every
+/// `AppState::dock_channels.remove(index)` call site — see `dock_kind`'s
+/// doc comment on why this lockstep happens in `main.rs` rather than
+/// inside `graph.rs`'s pure, `Vec<Vec<String>>`-only functions.
+fn remove_dock_kind(state: &mut AppState, index: usize) {
+    if index < state.dock_kind.len() {
+        state.dock_kind.remove(index);
+    }
+}
+
+/// Lockstep counterpart to `graph::reorder_docks` for `dock_kind`.
+fn reorder_dock_kind(state: &mut AppState, source: usize, target: usize) {
+    if source == target || source >= state.dock_kind.len() || target >= state.dock_kind.len() {
+        return;
+    }
+    let moved = state.dock_kind.remove(source);
+    state.dock_kind.insert(target, moved);
+}
+
+/// Lockstep counterpart to `graph::merge_docks` for `dock_kind`: the
+/// source dock disappears (its kind with it) and the target dock's own
+/// kind is left exactly as it was — merging channels into an existing
+/// dock never changes what kind of dock it is.
+fn merge_dock_kind(state: &mut AppState, source: usize, target: usize) {
+    if source == target || source >= state.dock_kind.len() || target >= state.dock_kind.len() {
+        return;
+    }
+    state.dock_kind.remove(source);
 }
 
 /// Push the in-progress dock drag (which dock is being dragged, which one
@@ -1599,6 +1699,7 @@ fn load_file(window: &AppWindow, state: &Rc<RefCell<AppState>>, path: &Path) {
         state.session = Some(session);
         state.all_channel_names.clone_from(&all_channel_names);
         state.filter_text.clear();
+        state.dock_kind = vec![graph::DockKind::TimeSeries; default_dock_channels.len()];
         state.dock_channels = default_dock_channels;
         state.overlay_pending.clear();
         state.selected_lap_index = 0;
@@ -1735,75 +1836,107 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
         // overlay dock has no single shared y-scale to draw gridlines
         // against.
         let mut single_channel_range: Option<(f64, f64)> = None;
-        // One color per (channel, lap-range) combination generated,
-        // sequential in that order — for the common single-channel case
-        // this is exactly the old per-lap coloring; overlaying channels
-        // just extends the same sequence. Starts from the running
-        // worksheet-wide index (plain mode) or fresh at 0 (comparison
-        // mode, to match the shared legend) — see above.
-        let mut color_index = if comparing { 0 } else { worksheet_color_index };
+        let mut gg_circle = GgCircleData {
+            trace_commands: String::new().into(),
+            reference_commands: String::new().into(),
+        };
+        let kind_int: i32;
 
-        for name in group {
-            let Some(channel) = session.channels.get(name) else {
-                continue;
-            };
+        match state.dock_kind.get(i).cloned().unwrap_or_default() {
+            graph::DockKind::TimeSeries => {
+                kind_int = 0;
+                // One color per (channel, lap-range) combination
+                // generated, sequential in that order — for the common
+                // single-channel case this is exactly the old per-lap
+                // coloring; overlaying channels just extends the same
+                // sequence. Starts from the running worksheet-wide index
+                // (plain mode) or fresh at 0 (comparison mode, to match
+                // the shared legend) — see above.
+                let mut color_index = if comparing { 0 } else { worksheet_color_index };
 
-            if let Some(plotted) = plotted.as_mut() {
-                plotted.insert(
-                    name.clone(),
-                    PlottedChannel {
-                        timecodes: channel.timecodes.clone(),
-                        values: channel.values.clone(),
-                        interpolate: channel.interpolate,
-                    },
-                );
+                for name in group {
+                    let Some(channel) = session.channels.get(name) else {
+                        continue;
+                    };
+
+                    if let Some(plotted) = plotted.as_mut() {
+                        plotted.insert(
+                            name.clone(),
+                            PlottedChannel {
+                                timecodes: channel.timecodes.clone(),
+                                values: channel.values.clone(),
+                                interpolate: channel.interpolate,
+                            },
+                        );
+                    }
+
+                    if let Some(plot) = graph::build_lap_comparison_plot(
+                        channel,
+                        VIEW_WIDTH,
+                        VIEW_HEIGHT,
+                        &ranges,
+                        time_span,
+                        state.axis_mode,
+                        distance_channel,
+                    ) {
+                        any_data = true;
+                        if group.len() == 1 {
+                            single_channel_range = Some((plot.min_val, plot.max_val));
+                        }
+                        // Only label traces when the dock overlays more than one
+                        // channel — with a single channel the dock header already
+                        // names it, and lap comparison already has its own
+                        // top-level legend (see `DockPanel`'s per-series legend).
+                        let label = if group.len() > 1 {
+                            channel.name.clone()
+                        } else {
+                            String::new()
+                        };
+                        if group.len() > 1 {
+                            // This channel's first trace's color, so the legend
+                            // swatch always matches what the eye picks out as
+                            // "this channel's color" even when it also has
+                            // several lap traces in a different shade sequence.
+                            channel_legend.push(LegendEntry {
+                                label: label.clone().into(),
+                                color: series_color(color_index),
+                            });
+                        }
+                        for s in plot.series {
+                            series.push(SeriesData {
+                                commands: s.commands.into(),
+                                color: series_color(color_index),
+                                label: label.clone().into(),
+                            });
+                            color_index += 1;
+                        }
+                    }
+                }
+
+                if !comparing {
+                    worksheet_color_index = color_index;
+                }
             }
-
-            if let Some(plot) = graph::build_lap_comparison_plot(
-                channel,
-                VIEW_WIDTH,
-                VIEW_HEIGHT,
-                &ranges,
-                time_span,
-                state.axis_mode,
-                distance_channel,
-            ) {
-                any_data = true;
-                if group.len() == 1 {
-                    single_channel_range = Some((plot.min_val, plot.max_val));
-                }
-                // Only label traces when the dock overlays more than one
-                // channel — with a single channel the dock header already
-                // names it, and lap comparison already has its own
-                // top-level legend (see `DockPanel`'s per-series legend).
-                let label = if group.len() > 1 {
-                    channel.name.clone()
-                } else {
-                    String::new()
-                };
-                if group.len() > 1 {
-                    // This channel's first trace's color, so the legend
-                    // swatch always matches what the eye picks out as
-                    // "this channel's color" even when it also has
-                    // several lap traces in a different shade sequence.
-                    channel_legend.push(LegendEntry {
-                        label: label.clone().into(),
-                        color: series_color(color_index),
-                    });
-                }
-                for s in plot.series {
-                    series.push(SeriesData {
-                        commands: s.commands.into(),
-                        color: series_color(color_index),
-                        label: label.clone().into(),
-                    });
-                    color_index += 1;
+            graph::DockKind::GgCircle {
+                lat_channel,
+                long_channel,
+            } => {
+                kind_int = 1;
+                if let (Some(lat), Some(long)) = (
+                    session.channels.get(&lat_channel),
+                    session.channels.get(&long_channel),
+                ) {
+                    if let Some(plot) =
+                        graph::build_gg_scatter_plot(lat, long, &ranges, VIEW_WIDTH, VIEW_HEIGHT)
+                    {
+                        any_data = true;
+                        gg_circle = GgCircleData {
+                            trace_commands: plot.trace_commands.into(),
+                            reference_commands: plot.reference_circle_commands.into(),
+                        };
+                    }
                 }
             }
-        }
-
-        if !comparing {
-            worksheet_color_index = color_index;
         }
 
         let channel_name = group.join(" + ");
@@ -1850,6 +1983,8 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
                 grid_col,
                 gridlines: slint::ModelRc::new(slint::VecModel::from(gridlines)),
                 latest_value_text: latest_value_text.into(),
+                kind: kind_int,
+                gg_circle,
             });
         } else {
             #[allow(clippy::cast_possible_truncation)]
@@ -1861,11 +1996,17 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
                 view_width: VIEW_WIDTH as f32,
                 view_height: VIEW_HEIGHT as f32,
                 has_data: false,
-                status_text: "No samples in this range.".into(),
+                status_text: if kind_int == 1 {
+                    "No lateral/longitudinal g-force samples in this range.".into()
+                } else {
+                    "No samples in this range.".into()
+                },
                 grid_row,
                 grid_col,
                 gridlines: slint::ModelRc::new(slint::VecModel::from(Vec::<GridlineData>::new())),
                 latest_value_text: String::new().into(),
+                kind: kind_int,
+                gg_circle,
             });
         }
     }
