@@ -988,6 +988,29 @@ pub fn merge_docks(docks: &mut Vec<Vec<String>>, source: usize, target: usize) -
     true
 }
 
+/// Pull one channel back out of an overlay dock, reporting whether
+/// anything changed. The counterpart to [`merge_docks`]: merging has no
+/// inverse gesture of its own, so this is what backs the small remove
+/// control on each swatch in a merged dock's per-channel legend (see
+/// `app.slint`'s `DockPanel`).
+///
+/// Deliberately does *not* collapse a dock down to zero channels itself —
+/// callers plot from `dock_channels` on every change, and a dock that goes
+/// from two channels to one already renders as a plain single-channel dock
+/// (its per-channel legend only shows for `len() > 1`), so there is
+/// nothing left to collapse. A dock can only reach this control with two
+/// or more channels in the first place, so `dock` is never left empty.
+pub fn remove_channel_from_dock(docks: &mut [Vec<String>], dock: usize, channel: &str) -> bool {
+    let Some(group) = docks.get_mut(dock) else {
+        return false;
+    };
+    let Some(pos) = group.iter().position(|c| c == channel) else {
+        return false;
+    };
+    group.remove(pos);
+    true
+}
+
 /// All channel names in `session`, sorted alphabetically — the unfiltered
 /// list backing the channel search/picker.
 #[must_use]
@@ -2109,6 +2132,26 @@ mod tests {
         assert!(!merge_docks(&mut docks, 1, 1));
         assert!(!merge_docks(&mut docks, 5, 0));
         assert!(!merge_docks(&mut docks, 0, 5));
+        assert_eq!(docks, before);
+    }
+
+    #[test]
+    fn remove_channel_from_dock_drops_only_the_named_channel() {
+        let mut docks = vec![vec![
+            "Speed".to_string(),
+            "Throttle".to_string(),
+            "Brake".to_string(),
+        ]];
+        assert!(remove_channel_from_dock(&mut docks, 0, "Throttle"));
+        assert_eq!(docks, vec![vec!["Speed".to_string(), "Brake".to_string()]]);
+    }
+
+    #[test]
+    fn remove_channel_from_dock_is_a_no_op_for_an_unknown_channel_or_dock_index() {
+        let mut docks = vec![vec!["Speed".to_string(), "Throttle".to_string()]];
+        let before = docks.clone();
+        assert!(!remove_channel_from_dock(&mut docks, 0, "Brake"));
+        assert!(!remove_channel_from_dock(&mut docks, 5, "Speed"));
         assert_eq!(docks, before);
     }
 

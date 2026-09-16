@@ -74,14 +74,23 @@ reorder, Ctrl to merge into an overlay group).
 
 **Known gaps worth recording (none blocking):**
 
-- **An overlay group can be built but not taken apart.** Dragging merges
-  (Ctrl) and reorders (plain), but there's no gesture for pulling one channel
-  back out of a merged dock — the only exit is removing the whole dock with
-  its "x" and re-adding the channels individually. The natural shape is a
-  small remove control per swatch in the dock's existing per-channel legend
-  (`app.slint`'s `DockPanel`, shown only when a dock overlays more than one
-  channel), which would need `dock_channels[i]` to drop one entry and collapse
-  the dock back to a plain one when a single channel is left.
+- ~~An overlay group can be built but not taken apart.~~ *(Closed
+  2026-09-15.)* Each swatch in a merged dock's per-channel legend now has a
+  small "×" (`graph::remove_channel_from_dock`, wired through `app.slint`'s
+  `DockPanel.channel-removed` callback to `on_channel_removed_from_dock` in
+  `main.rs`) — clicking it drops just that channel; the dock collapses back
+  to a plain single-channel one automatically once one remains, since
+  rendering already treats `group.len() == 1` that way. Note for future
+  `DockPanel` markup: each legend entry is a plain `Rectangle` with children
+  positioned by absolute `x`, not a nested `HorizontalLayout` — Slint's
+  flex-style distribution kept stretching the label to fill the row's
+  leftover width regardless of any `horizontal-stretch` set on the entry or
+  a spacer (see `i-slint-core`'s `layout.rs`: *every* layout falls back to
+  treating all its own children as equally stretchy whenever none of them
+  individually asks for stretch, and that fallback is evaluated separately
+  at each nesting level — a spacer fixes it one level up, not the level
+  where the ambiguity actually lives), stranding the remove button far from
+  its label.
 - The stacked layout's `ListView` would normally steal a drag past 8px and
   cancel the dragged header's grab; it doesn't only because Slint's
   `ScrollView` defaults to `interactive: false` (drag-to-pan off). If that

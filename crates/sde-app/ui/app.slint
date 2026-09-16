@@ -20,6 +20,11 @@ export struct SeriesData {
     label: string,
 }
 
+export struct LegendEntry {
+    label: string,
+    color: color,
+}
+
 export struct DockData {
     channel-name: string,
     channel-units: string,
@@ -28,6 +33,12 @@ export struct DockData {
     // overlaying multiple channels in one dock (see
     // `graph::build_lap_comparison_plot`).
     series: [SeriesData],
+    // One entry per distinct channel plotted in this dock, in the same
+    // color a channel's traces use — only populated when the dock
+    // overlays more than one channel (see `series`' `label`, which this
+    // parallels but without a duplicate row per compared lap). Backs the
+    // per-channel legend's remove control below.
+    channel-legend: [LegendEntry],
     view-width: float,
     view-height: float,
     has-data: bool,
@@ -47,11 +58,6 @@ export struct SetupRowData {
     value: string,
     // Percentage change on a diff row; empty otherwise.
     detail: string,
-}
-
-export struct LegendEntry {
-    label: string,
-    color: color,
 }
 
 // One channel's graph row: header (name/units, cursor readout, remove
@@ -74,6 +80,11 @@ component DockPanel {
     in property <bool> drop-merges;
 
     callback removed();
+    // A channel's remove control in the per-channel legend was clicked
+    // (see below) — carries that channel's name, since the legend is the
+    // only place a merged dock's individual channels are addressable from
+    // the UI (the header's drag handle moves/merges the whole dock).
+    callback channel-removed(string);
     callback cursor-moved(float); // fraction 0..1 across the graph width
     callback zoom-scrolled(float, float, float); // delta-x, delta-y, cursor fraction
 
@@ -176,20 +187,59 @@ component DockPanel {
         // Per-channel color key, shown only for an overlay dock (more
         // than one channel plotted together) — a plain single-channel
         // dock's header already names its one channel, and lap
-        // comparison already has its own top-level legend.
-        if root.dock.series.length > 1 && root.dock.series[0].label != "": HorizontalLayout {
+        // comparison already has its own top-level legend. One row per
+        // *channel* (`channel-legend`, deduplicated in Rust), not one per
+        // trace — a dock overlaying channels while also comparing laps
+        // would otherwise repeat the same channel's swatch once per lap.
+        //
+        // Merging (Ctrl-drag a dock's header onto another, above) has no
+        // gesture of its own to undo — this remove control is that
+        // undo, one channel at a time, rather than only being able to
+        // remove the whole dock via its header's "x".
+        if root.dock.channel-legend.length > 0: HorizontalLayout {
             spacing: 10px;
-            for s in root.dock.series: HorizontalLayout {
-                spacing: 4px;
+            // Each entry is a plain `Rectangle`, not a nested
+            // `HorizontalLayout` — Slint's flex-style distribution among
+            // *that* layout's own swatch/label/remove-button children kept
+            // stretching the label to eat the row's leftover width no
+            // matter what stretch factors were set here or on the outer
+            // row, stranding the remove button far past its label. Sizing
+            // this wrapper explicitly from `lbl`'s own measured width and
+            // positioning every child by absolute `x` sidesteps that
+            // distribution entirely — nothing here is ever asked to grow.
+            for entry in root.dock.channel-legend: Rectangle {
+                width: 12px + lbl.preferred-width + 4px + 12px;
+                height: 12px;
                 Rectangle {
+                    x: 0px;
+                    y: 2px;
                     width: 8px;
                     height: 8px;
-                    background: s.color;
+                    background: entry.color;
                 }
-                Text {
-                    text: s.label;
+                lbl := Text {
+                    x: 12px;
+                    y: 0px;
+                    text: entry.label;
                     font-size: 10px;
                     color: gray;
+                }
+                channel-remove-area := TouchArea {
+                    x: 12px + lbl.preferred-width + 4px;
+                    y: 0px;
+                    width: 12px;
+                    height: 12px;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { root.channel-removed(entry.label); }
+                    Text {
+                        text: "×";
+                        font-size: 11px;
+                        color: channel-remove-area.has-hover ? white : #ffffff60;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
                 }
             }
         }
@@ -397,6 +447,7 @@ export component AppWindow inherits Window {
     callback show-empty-channels-toggled(bool);
     callback dock-selected(string); // toggles a channel in/out of the worksheet as its own dock
     callback dock-removed(int); // index into `docks`
+    callback channel-removed-from-dock(int, string); // dock index, channel name
     callback dock-drag-started(int); // index into `docks`: begin dragging that dock's header
     callback dock-drag-moved(int, float, float, float, float, bool); // source index, dx, dy, cell width, cell height, ctrl held
     callback dock-drag-ended(); // reorder into (or, with ctrl, merge into) `dock-drag-target` if there is one, then clear the drag
@@ -884,6 +935,7 @@ export component AppWindow inherits Window {
                             drop-highlight: root.dock-drag-target == i;
                             drop-merges: root.dock-drag-merges;
                             removed => { root.dock-removed(i); }
+                            channel-removed(name) => { root.channel-removed-from-dock(i, name); }
                             cursor-moved(f) => { root.cursor-moved(f); }
                             zoom-scrolled(dx, dy, f) => { root.zoom-scrolled(dx, dy, f); }
                             drag-started => { root.dock-drag-started(i); }
@@ -909,6 +961,7 @@ export component AppWindow inherits Window {
                             drop-highlight: root.dock-drag-target == i;
                             drop-merges: root.dock-drag-merges;
                             removed => { root.dock-removed(i); }
+                            channel-removed(name) => { root.channel-removed-from-dock(i, name); }
                             cursor-moved(f) => { root.cursor-moved(f); }
                             zoom-scrolled(dx, dy, f) => { root.zoom-scrolled(dx, dy, f); }
                             drag-started => { root.dock-drag-started(i); }
@@ -941,6 +994,7 @@ export component AppWindow inherits Window {
                             drop-highlight: root.dock-drag-target == i;
                             drop-merges: root.dock-drag-merges;
                             removed => { root.dock-removed(i); }
+                            channel-removed(name) => { root.channel-removed-from-dock(i, name); }
                             cursor-moved(f) => { root.cursor-moved(f); }
                             zoom-scrolled(dx, dy, f) => { root.zoom-scrolled(dx, dy, f); }
                             drag-started => { root.dock-drag-started(i); }
