@@ -478,6 +478,23 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    {
+        let window_weak = window.as_weak();
+        let state = state.clone();
+        window.on_channel_removed_from_dock(move |index, name| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            if let Ok(index) = usize::try_from(index) {
+                let mut state_mut = state.borrow_mut();
+                graph::remove_channel_from_dock(&mut state_mut.dock_channels, index, &name);
+                drop(state_mut);
+                refresh_channel_list(&window, &state);
+                replot(&window, &state);
+            }
+        });
+    }
+
     // -- header drag-and-drop: reorder docks, or merge them with Ctrl --
     //
     // The three handlers are deliberately thin: all the geometry lives in
@@ -1613,6 +1630,10 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
         let (grid_row, grid_col) = ((i as i32) / GRID_COLUMNS, (i as i32) % GRID_COLUMNS);
 
         let mut series: Vec<SeriesData> = Vec::new();
+        // One entry per channel in `group` (not per trace — see `label`
+        // below), only populated when the dock overlays more than one
+        // channel. Backs the per-channel legend's remove control.
+        let mut channel_legend: Vec<LegendEntry> = Vec::new();
         let mut any_data = false;
         // One color per (channel, lap-range) combination generated,
         // sequential in that order — for the common single-channel case
@@ -1657,6 +1678,16 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
                 } else {
                     String::new()
                 };
+                if group.len() > 1 {
+                    // This channel's first trace's color, so the legend
+                    // swatch always matches what the eye picks out as
+                    // "this channel's color" even when it also has
+                    // several lap traces in a different shade sequence.
+                    channel_legend.push(LegendEntry {
+                        label: label.clone().into(),
+                        color: series_color(color_index),
+                    });
+                }
                 for s in plot.series {
                     series.push(SeriesData {
                         commands: s.commands.into(),
@@ -1687,6 +1718,7 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
                 channel_name: channel_name.into(),
                 channel_units: channel_units.into(),
                 series: slint::ModelRc::new(slint::VecModel::from(series)),
+                channel_legend: slint::ModelRc::new(slint::VecModel::from(channel_legend)),
                 // `VIEW_WIDTH`/`VIEW_HEIGHT` (1000.0) are small, exactly
                 // f32-representable UI coordinates, so this narrowing
                 // cast never actually loses precision in practice.
@@ -1705,6 +1737,7 @@ fn replot(window: &AppWindow, state: &Rc<RefCell<AppState>>) {
                 channel_name: channel_name.into(),
                 channel_units: channel_units.into(),
                 series: slint::ModelRc::new(slint::VecModel::from(Vec::<SeriesData>::new())),
+                channel_legend: slint::ModelRc::new(slint::VecModel::from(channel_legend)),
                 view_width: VIEW_WIDTH as f32,
                 view_height: VIEW_HEIGHT as f32,
                 has_data: false,
