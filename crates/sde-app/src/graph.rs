@@ -344,6 +344,37 @@ pub struct MultiPlotData {
     pub series: Vec<SeriesPlot>,
     pub view_width: f64,
     pub view_height: f64,
+    // The padded `(min, max)` value range every series was scaled against
+    // (i.e. `min_val`/`min_val + val_span` from [`value_scale`]) — the
+    // same range the y-flip in this function's plotting math uses, so a
+    // gridline built from these two numbers via [`gridline_values`] lines
+    // up with where the traces actually render, not the raw unpadded data
+    // range.
+    pub min_val: f64,
+    pub max_val: f64,
+}
+
+/// Evenly spaced gridline positions across `[min, max]`, as
+/// `(y_fraction, value)` pairs: `y_fraction` runs `0.0` (at `max`) to
+/// `1.0` (at `max`'s opposite end, `min`), top-to-bottom, matching the
+/// y-flip every plot in this module already applies (`view_height - (v -
+/// min_val) / val_span * view_height` — a larger value plots at a smaller
+/// y). `count` gridlines are returned, evenly spaced inclusive of both
+/// ends; `count == 0` returns an empty `Vec`, and `count == 1` returns a
+/// single gridline at `max`. Degenerate `min == max` still returns
+/// `count` gridlines, all at that same value.
+#[must_use]
+pub fn gridline_values(min: f64, max: f64, count: usize) -> Vec<(f64, f64)> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let denom = count.saturating_sub(1).max(1) as f64;
+    (0..count)
+        .map(|i| {
+            let t = i as f64 / denom;
+            (t, max - t * (max - min))
+        })
+        .collect()
 }
 
 /// The shared time-axis span for a set of `(start_ms, end_ms)` lap
@@ -677,6 +708,8 @@ pub fn build_lap_comparison_plot(
         series,
         view_width,
         view_height,
+        min_val,
+        max_val: min_val + val_span,
     })
 }
 
@@ -1413,6 +1446,32 @@ mod tests {
     fn shared_duration_is_the_longest_range() {
         assert_eq!(shared_duration(&[(0.0, 10.0), (5.0, 25.0)]), 20.0);
         assert_eq!(shared_duration(&[]), f64::EPSILON);
+    }
+
+    #[test]
+    fn gridline_values_normal_case_is_evenly_spaced_top_to_bottom() {
+        assert_eq!(
+            gridline_values(0.0, 30.0, 4),
+            vec![
+                (0.0, 30.0),
+                (1.0 / 3.0, 20.0),
+                (2.0 / 3.0, 10.0),
+                (1.0, 0.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn gridline_values_empty_for_zero_count() {
+        assert_eq!(gridline_values(0.0, 30.0, 0), Vec::new());
+    }
+
+    #[test]
+    fn gridline_values_degenerate_range_repeats_the_same_value() {
+        assert_eq!(
+            gridline_values(5.0, 5.0, 3),
+            vec![(0.0, 5.0), (0.5, 5.0), (1.0, 5.0)]
+        );
     }
 
     #[test]

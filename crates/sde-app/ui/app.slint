@@ -25,6 +25,14 @@ export struct LegendEntry {
     color: color,
 }
 
+// One horizontal gridline on a single-channel dock's y-axis: `y` is a
+// 0.0 (top) .. 1.0 (bottom) fraction of the dock's plotted height (see
+// `graph::gridline_values`), `label` its already-formatted value text.
+export struct GridlineData {
+    y: float,
+    label: string,
+}
+
 export struct DockData {
     channel-name: string,
     channel-units: string,
@@ -47,6 +55,15 @@ export struct DockData {
     // mode below never needs modulo/division inside markup.
     grid-row: int,
     grid-col: int,
+    // Y-axis scale labels; only populated for single-channel docks (an
+    // overlay dock has no single shared scale — see `replot` in
+    // main.rs). Empty for a no-data dock too.
+    gridlines: [GridlineData],
+    // The dock header's "value at rest" readout: the plotted channel(s)'
+    // value at the end of the active range(s), already formatted.
+    // Overridden live by the drag-cursor readout (`cursor-value`) while
+    // dragging.
+    latest-value-text: string,
 }
 
 // One line in the setup panel: either a group header or a value/diff row.
@@ -175,7 +192,7 @@ component DockPanel {
                 // dock's path commands. Fixed width (rather than sizing
                 // to content) so the row doesn't reflow every time the
                 // value's digit count changes as the cursor moves.
-                text: root.cursor-visible ? root.cursor-value : "";
+                text: root.cursor-visible ? root.cursor-value : root.dock.latest-value-text;
                 font-size: 13px;
                 color: gray;
                 min-width: 160px;
@@ -319,6 +336,25 @@ component DockPanel {
                             max(0.0, min(1.0, self.mouse-x / self.width)));
                         accept
                     }
+                }
+            }
+
+            for g in root.dock.gridlines: Rectangle {
+                x: 0px;
+                y: g.y * parent.height;
+                width: 100%;
+                height: 1px;
+                background: #3a3f4b;
+
+                Text {
+                    x: 4px;
+                    // Labels sit just below their line, except the
+                    // bottom-most one (which would otherwise run off the
+                    // dock's lower edge), which sits just above instead.
+                    y: g.y < 0.9 ? 2px : -self.height - 2px;
+                    text: g.label;
+                    font-size: 9px;
+                    color: gray;
                 }
             }
 
