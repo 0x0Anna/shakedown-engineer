@@ -548,16 +548,22 @@ fn decode_channel(data: &[u8], record: &RawChannelRecord) -> Result<LdChannel, L
     // each (halves peak transient allocation per channel during decode).
     let values: Vec<f64> = match (record.elem_type, record.elem_size) {
         (0 | 3 | 5, 2) => raw_bytes
-            .chunks_exact(2)
-            .map(|c| convert(f64::from(i16::from_le_bytes([c[0], c[1]]))))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| convert(f64::from(i16::from_le_bytes(*c))))
             .collect(),
         (0 | 3 | 5, 4) => raw_bytes
-            .chunks_exact(4)
-            .map(|c| convert(f64::from(i32::from_le_bytes([c[0], c[1], c[2], c[3]]))))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| convert(f64::from(i32::from_le_bytes(*c))))
             .collect(),
         (7, 4) => raw_bytes
-            .chunks_exact(4)
-            .map(|c| convert(f64::from(f32::from_le_bytes([c[0], c[1], c[2], c[3]]))))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| convert(f64::from(f32::from_le_bytes(*c))))
             .collect(),
         (0 | 3 | 5 | 7, size) => {
             return Err(LdError::UnsupportedElemSize {
