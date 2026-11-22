@@ -976,6 +976,17 @@ Subaru_WRX_STI/*.ibt`) before writing any Rust:
    the actual telemetry channel-log source to target here — it's documented,
    plain-text, and column-named, unlike the `.rpl` replay files (see below), so
    it should land before/alongside any `.rpl` work.
+   **ACR (done, 2026-11):** `sde_acr::savegame` parses the game's
+   `CarSetupsDataSaveSlot.sav` (a GVAS file with a custom, undocumented payload,
+   decoded from a real game 0.7 file: 4 cars, 8 setups, parsed to the last
+   byte) and `sde_setup::acr` adapts each saved setup onto the model, grouped
+   by the key's first segment (Brakes, Differentials, Suspensions, Axles,
+   Wheels, Dampers, Other). Only the units confirmed against telemetry are
+   attached (tyre pressure psi, master cylinder mm). `diff_setups` accepts
+   `file.sav` (list) and `file.sav::name` (print / diff). Limits: the file holds
+   only *saved* setups, not whichever one was active during a run, and the
+   `.sav` layout is reverse-engineered, so a game update can break it (the
+   parser errors rather than guessing).
 10. *(Future, deferred)* **`sde-viz`** — data-driven pose animation:
     - `CarPose` struct (roll, pitch, yaw, position, steer angle, 4x wheel travel)
       computed from logged channels — no physics simulation, just geometry:

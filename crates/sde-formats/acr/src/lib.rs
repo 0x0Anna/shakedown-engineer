@@ -26,6 +26,7 @@
 //! same bar `sde-motec`/`sde-ibt` are.
 
 mod error;
+pub mod savegame;
 
 use std::collections::HashMap;
 use std::fs;

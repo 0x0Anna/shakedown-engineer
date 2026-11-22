@@ -6,4 +6,5 @@ license.workspace = true
 description = "Sim-agnostic car setup sheet model and diff engine, populated by per-sim adapters over sde-formats (UI-free)"
 
 [dependencies]
+sde-acr = { path = "../sde-formats/acr" }
 sde-rbr = { path = "../sde-formats/rbr" }

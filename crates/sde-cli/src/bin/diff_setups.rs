@@ -9,34 +9,40 @@
 //! Usage:
 //!   `diff_setups <setup.lsp>`               — print the whole sheet
 //!   `diff_setups <left.lsp> <right.lsp>`    — print only what differs
+//!
+//! AC Rally keeps every saved setup in one `CarSetupsDataSaveSlot.sav`
+//! (in the `acr/Saved/SaveGames` folder under `%LOCALAPPDATA%`), so there:
+//!   `diff_setups <file.sav>`                — list the saved setups
+//!   `diff_setups <file.sav>::<name>`        — print one setup
+//!   `diff_setups <file.sav>::<a> <file.sav>::<b>` — diff two of them
+//! Either form can be mixed, and `<name>` can be `<name>@<car id>` when
+//! two cars share a setup name.
 
 // `doc_markdown`: fires on the plain-English `PROJECT_PLAN.md` mention
 // above, matching the allow in `dump_channels`.
 #![allow(clippy::doc_markdown)]
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let args: Vec<PathBuf> = env::args_os().skip(1).map(PathBuf::from).collect();
+    let args: Vec<String> = env::args().skip(1).collect();
 
     match args.as_slice() {
-        [one] => match sde_setup::rbr::load_lsp(one) {
+        [one] if is_bare_sav(one) => list_sav(Path::new(one)),
+        [one] => match load(one) {
             Ok(setup) => {
                 print_setup(&setup);
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("failed to load {}: {e}", one.display());
+                eprintln!("failed to load {one}: {e}");
                 ExitCode::FAILURE
             }
         },
         [left, right] => {
-            let (left, right) = match (
-                sde_setup::rbr::load_lsp(left),
-                sde_setup::rbr::load_lsp(right),
-            ) {
+            let (left, right) = match (load(left), load(right)) {
                 (Ok(l), Ok(r)) => (l, r),
                 (Err(e), _) | (_, Err(e)) => {
                     eprintln!("failed to load setup: {e}");
@@ -47,7 +53,52 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: diff_setups <setup.lsp> [<other-setup.lsp>]");
+            eprintln!("usage: diff_setups <setup.lsp|file.sav[::name]> [<other>]");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// A `.sav` path with no `::name` selector.
+fn is_bare_sav(arg: &str) -> bool {
+    !arg.contains("::")
+        && Path::new(arg)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("sav"))
+}
+
+/// Load an RBR `.lsp`, or one named setup from an AC Rally `.sav`.
+fn load(arg: &str) -> Result<sde_setup::Setup, String> {
+    let Some((path, selector)) = arg.split_once("::") else {
+        return sde_setup::rbr::load_lsp(&PathBuf::from(arg)).map_err(|e| e.to_string());
+    };
+    let (name, car) = match selector.split_once('@') {
+        Some((n, c)) => (n, Some(c)),
+        None => (selector, None),
+    };
+    let save = sde_acr::savegame::parse_car_setups(Path::new(path)).map_err(|e| e.to_string())?;
+    save.find(name, car)
+        .map(sde_setup::acr::from_saved)
+        .ok_or_else(|| format!("no setup named {name:?} in {path}"))
+}
+
+fn list_sav(path: &Path) -> ExitCode {
+    match sde_acr::savegame::parse_car_setups(path) {
+        Ok(save) => {
+            for car in &save.cars {
+                println!("{}", car.car_id);
+                for s in &car.setups {
+                    let surface = s.surface.as_deref().unwrap_or("-");
+                    println!(
+                        "  {:<18} {:<28} {:<7} v{}",
+                        s.name, s.stage, surface, s.game_version
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("failed to load {}: {e}", path.display());
             ExitCode::FAILURE
         }
     }
