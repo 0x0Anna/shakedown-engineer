@@ -148,7 +148,10 @@ crates/
 │   │                      #   pairing.rs — telemetry <-> replay matching (DONE)
 │   │                      #   setup.rs   — .lsp setup sheet (DONE)
 │   │                      #   todo: pacenote .ini, .rpl frames
-│   └── dirt_rally/, acr/, ea_wrc/         # per-sim SETUP FILE adapters
+│   ├── acr/               # AC Rally — DONE (`sde-acr`).
+│   │                      #   lib.rs      — acr_telemetry `acr_export --csv` telemetry (196 channels)
+│   │                      #   savegame.rs — CarSetupsDataSaveSlot.sav saved setups (GVAS, reverse-engineered)
+│   └── dirt_rally/, ea_wrc/               # per-sim SETUP FILE adapters
 │                                            # (read each sim's own install-dir car/track/
 │                                            #  setup files, map into sde-setup's model —
 │                                            #  same adapter pattern as telemetry parsers,
@@ -987,6 +990,22 @@ Subaru_WRX_STI/*.ibt`) before writing any Rust:
    only *saved* setups, not whichever one was active during a run, and the
    `.sav` layout is reverse-engineered, so a game update can break it (the
    parser errors rather than guessing).
+
+   **ACR telemetry findings (game 0.7, 2026-11):** `sde-acr`'s CSV parser was
+   validated on a real export (196 channels x 88,775 samples, 279 s; fixture
+   excerpt in `crates/sde-formats/acr/tests/`). The game's shared memory is
+   unchanged from the ACC layout and leaves much of it empty: damage, tyre wear,
+   per-zone tyre temperatures, pad/disc life, TC state and engine brake are
+   constant zero (even after a deliberate impact); `tyre_core_temp` stays near
+   ambient; `abs` is a 0/1 flag. Analysis features (milestone 7) must not rely
+   on those channels; brake temperature, wheel load/slip, suspension travel
+   and tyre forces do carry signal. The game's own in-car telemetry channels
+   exist (strings in `acr.exe`: `TYRE_TAIR_*`, `BRAKE_TEMP_*`, ...) but are not
+   published to shared memory, and no config switch was found to enable more.
+   Unit labels in exports made before acr_telemetry's fix (0x0Anna/acr_telemetry
+   PR #7) are wrong for several channels (temperatures labelled C are Kelvin,
+   suspension travel labelled mm is metres, slip angle labelled deg is
+   radians); `sde-acr` passes labels through untouched.
 10. *(Future, deferred)* **`sde-viz`** — data-driven pose animation:
     - `CarPose` struct (roll, pitch, yaw, position, steer angle, 4x wheel travel)
       computed from logged channels — no physics simulation, just geometry:

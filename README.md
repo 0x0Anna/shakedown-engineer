@@ -34,6 +34,12 @@ Milestones 1–6 done:
 - **Setups** — a `.lsp` parser, a sim-agnostic setup model, a diff engine, and
   a setup panel that auto-resolves the loaded run's sheet and can show only
   what differs from another.
+- **Assetto Corsa Rally** — telemetry from [acr_telemetry](https://github.com/decnet100/acr_telemetry)'s
+  `acr_export --csv` (about 196 channels; on game 0.7 many, such as damage,
+  tyre wear and per-zone tyre temperatures, are always zero because the game
+  does not fill them), and saved setups from `CarSetupsDataSaveSlot.sav`, which
+  the setup model and diff engine handle like RBR's `.lsp`. `diff_setups
+  file.sav::name` diffs two saved setups from the command line.
 
 Next is `sde-analysis` (milestone 7): damper velocity histograms, ABS/TC
 intervention stats, ride-height/roll estimates, brake bias effectiveness. See
@@ -47,6 +53,7 @@ crates/
 ├── sde-formats/motec/   # MoTeC .ld binary parser (binrw-based) + .ldx sidecar, UI-free
 ├── sde-formats/ibt/     # iRacing .ibt parser
 ├── sde-formats/shtep/   # SimHub telemetry export parser
+├── sde-formats/acr/     # AC Rally: acr_telemetry's CSV export + the game's saved setups (.sav)
 ├── sde-formats/rbr/     # RBR/RSF companion files: install paths, replay .ini, .lsp setups, .tsv
 ├── sde-core/            # Session/Channel/Lap data model, wraps sde-formats
 ├── sde-setup/           # Sim-agnostic setup model + diff engine, and the RBR adapter
