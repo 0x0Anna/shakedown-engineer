@@ -31,6 +31,7 @@
 // doc style (context first, no terse one-line summary).
 #![allow(clippy::doc_markdown, clippy::too_long_first_doc_paragraph)]
 
+pub mod acr;
 pub mod rbr;
 
 mod diff;

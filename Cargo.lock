@@ -4279,6 +4279,7 @@ dependencies = [
 name = "sde-cli"
 version = "0.1.0"
 dependencies = [
+ "sde-acr",
  "sde-core",
  "sde-setup",
 ]
@@ -4328,6 +4329,7 @@ dependencies = [
 name = "sde-setup"
 version = "0.1.0"
 dependencies = [
+ "sde-acr",
  "sde-rbr",
 ]
 

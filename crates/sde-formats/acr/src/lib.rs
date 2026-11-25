@@ -1,31 +1,75 @@
-//! Parser for [`acr_telemetry`](https://github.com/decnet100/acr_telemetry)'s
-//! `acr_export --csv` output: a MoTeC-style CSV (header format ported from
-//! [pyxrk-dev](https://github.com/mitchdetailed/pyxrk-dev), see that
-//! project's `src/export/motec_csv.rs`) that carries the full ACC/AC Rally
-//! shared-memory physics field set — a much larger channel list than
-//! either SimHub (`sde-shtep`'s source) or `acr_telemetry`'s own MoTeC
-//! `.ld` export can provide, since the `.ld` path is capped by whatever a
-//! hand-written `motec_profiles/*.toml` channel mapping declares. See this
-//! project's `acr-telemetry-capture-scoping` memory for the full
-//! reasoning behind parsing the CSV directly instead.
+//! Parsers for Assetto Corsa Rally, in two independent parts:
 //!
-//! `acr_telemetry` is PolyForm Noncommercial-licensed; this crate is an
-//! independent implementation written from its documented/observed output
-//! format only (no code ported or vendored), the same relationship
-//! `sde-shtep` has to the SimHub Telemetry Export Plugin.
+//! - **Telemetry** ([`parse`], [`parse_str`]): the CSV written by
+//!   [`acr_telemetry`](https://github.com/decnet100/acr_telemetry)'s
+//!   `acr_export --csv`. It is a MoTeC-style CSV (header layout ported from
+//!   [pyxrk-dev](https://github.com/mitchdetailed/pyxrk-dev); see
+//!   `src/export/motec_csv.rs` in `acr_telemetry`) that carries the full ACC /
+//!   AC Rally shared-memory physics set, about 196 channels, far more than
+//!   SimHub (`sde-shtep`'s source) or `acr_telemetry`'s own `.ld` export,
+//!   whose channel list is capped by a hand-written `motec_profiles/*.toml`.
+//! - **Saved setups** ([`savegame`]): the game's `CarSetupsDataSaveSlot.sav`.
+//!   Adapted onto the setup model by `sde-setup`'s `acr` module.
 //!
-//! Unlike `sde-shtep`, there's no sidecar file — one CSV is fully
-//! self-describing (metadata preamble + channel names + units, all in one
-//! file), so [`parse`] only ever reads the one path given.
+//! # What the CSV does and does not contain
 //!
-//! No real `acr_export` output exists yet as a committed fixture (same gap
-//! `sde-shtep` had at first) — this parser is written directly from
-//! `motec_csv.rs`'s source (the exact header/row shape it writes), and
-//! this module's own tests are hand-authored against that spec. It should
-//! be validated against a real capture before being treated as done to the
-//! same bar `sde-motec`/`sde-ibt` are.
+//! The CSV can only hold what the game puts in its shared memory, and AC
+//! Rally 0.7 leaves much of that empty. Verified on a 0.7 recording (Skoda
+//! Fabia RS Rally2, Sweden, including a deliberate impact), these channels
+//! are present but constant zero: `tyre_wear_*`, `tyre_dirty_level_*`,
+//! `tyre_temp_i/m/o_*`, `car_damage_*`, `suspension_damage_*`, `pad_life_*`,
+//! `disc_life_*`, `tc`, `tc_in_action`, `abs_in_action`, `engine_brake`.
+//! `tyre_core_temp_*` stays near ambient, `fuel` is constant, and `abs` is a
+//! 0/1 flag rather than a level. Live data includes pedals, steering, gear,
+//! rpm, speed, velocities, G, orientation, wheel slip/load/pressure,
+//! suspension travel, brake temperature, tyre forces and moments, water, air
+//! and road temperature, and `brake_bias`. Analyses should not assume the
+//! zero channels carry signal. ABS/TC levels and the other setup values
+//! live in the saved-setup file, not in telemetry.
+//!
+//! # Dependencies on `acr_telemetry`
+//!
+//! This crate is an independent implementation written from `acr_telemetry`'s
+//! documented and observed output only (no code ported or vendored;
+//! `acr_telemetry` is PolyForm Noncommercial, the same relationship
+//! `sde-shtep` has to the SimHub plugin). It relies on:
+//!
+//! - the fixed signature row `"Format","MoTeC CSV File"`, then a metadata
+//!   preamble, a row starting `Time` with the channel names, and a units row;
+//! - one self-describing file (no sidecar), so [`parse`] reads only the one
+//!   path given;
+//! - channel names equal to `acr_telemetry`'s physics field names
+//!   (`docs/FIELDS.md` there is the reference).
+//!
+//! Unit strings are **passed through exactly as exported**. Exports made
+//! before `acr_telemetry`'s unit-label fix (0x0Anna/acr_telemetry PR #7) label
+//! several channels wrongly: `tyre_core_temp_*`, `brake_temp_*` and
+//! `tyre_temp_*` say `C` but are Kelvin; `suspension_travel_*` says `mm` but is
+//! metres; `slip_angle_*` says `deg` but is radians; `steer_angle` says `deg`
+//! but is normalised -1..1; and the `ride_height_rear`/`ballast`/`air_density`
+//! block is shifted by one. Nothing here corrects them, so a consumer that
+//! needs real units should convert by channel name, or re-export with a build
+//! that includes the fix.
+//!
+//! Export quirks that are not parser bugs: the whole file is one outing, so
+//! it loads as a single lap; the driver field is blank; and `Duration`/
+//! `End Time` come from the recorded capture times, which do not run at the
+//! nominal 333 Hz.
+//!
+//! # Validation
+//!
+//! Written first from `motec_csv.rs` alone, then validated against a real
+//! export: 196 channels x 88,775 samples over 279.1 s parsed with no rows
+//! dropped, and the sample count and duration match an independent
+//! reading of the same file. `tests/real_capture.rs` runs the parser on a
+//! 60-row excerpt of it (`tests/fixtures/`; the full file is 153 MB). The
+//! unit tests in this module use hand-built CSV for the error paths.
+//! `savegame` is validated the same way, against a real game 0.7 save, and
+//! its tests use a synthetic builder because the real file is a player's own
+//! setups.
 
 mod error;
+pub mod savegame;
 
 use std::collections::HashMap;
 use std::fs;

@@ -14,5 +14,6 @@ name = "diff_setups"
 path = "src/bin/diff_setups.rs"
 
 [dependencies]
+sde-acr = { path = "../sde-formats/acr" }
 sde-core = { path = "../sde-core" }
 sde-setup = { path = "../sde-setup" }
